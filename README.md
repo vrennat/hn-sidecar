@@ -39,11 +39,8 @@ The extension's only network origins:
 
 - Chrome MV3 extension, works loaded unpacked from `dist/`.
 - Index writer (Worker + D1 + R2) is operational on `hn-index.tanner.place`.
-- The Cloudflare Cache Rule is active: repeated shard requests return
-  `cf-cache-status: HIT`. Before launch, its Browser TTL must be changed to
-  Respect existing headers; `manifest.json` and `recent.json` currently expose
-  `max-age=14400` instead of their intended 300 seconds, which can delay new
-  discussions for up to four hours.
+- Cloudflare caches shards for six hours and `manifest.json` and `recent.json`
+  for five minutes; repeated GET requests return `cf-cache-status: HIT`.
 
 ## Limitations
 
