@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hn-sidecar-bench",
+  "compatibility_date": "2026-07-01",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hn-sidecar-bench",
+      "database_id": "037f254f-f474-448b-af36-4d6bd8b7addf"
+    }
+  ]
+}

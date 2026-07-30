@@ -1,0 +1,13 @@
+{
+  "name": "@hn-sidecar/extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "package": "bun run scripts/package.ts"
+  },
+  "dependencies": {
+    "@hn-sidecar/shared": "workspace:*"
+  }
+}

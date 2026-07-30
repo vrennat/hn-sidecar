@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "HN Sidecar",
+  "version": "0.1.0",
+  "description": "Find and read Hacker News discussions for the page in your active tab.",
+  "permissions": ["tabs", "storage", "sidePanel"],
+  "host_permissions": ["https://news.ycombinator.com/*", "https://hn-index.tanner.place/*"],
+  "minimum_chrome_version": "114",
+  "homepage_url": "https://github.com/vrennat/hn-sidecar",
+  "icons": {
+    "16": "icon-16.png",
+    "32": "icon-32.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "HN Sidecar",
+    "default_icon": {
+      "16": "icon-16.png",
+      "32": "icon-32.png",
+      "48": "icon-48.png",
+      "128": "icon-128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://news.ycombinator.com/*"],
+      "js": ["content-hn.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "commands": {
+    "_execute_action": {
+      "suggested_key": { "default": "Alt+H", "mac": "Alt+H" },
+      "description": "Open the HN Sidecar panel"
+    }
+  }
+}

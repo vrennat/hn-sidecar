@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hn-sidecar-index-writer",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "observability": { "enabled": true },
+
+  // Ingest every 10 minutes. The regen batch is not on a cron — it is
+  // an on-demand admin operation, triggered over the authenticated fetch handler.
+  "triggers": {
+    "crons": ["*/10 * * * *"]
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hn-sidecar",
+      "database_id": "fdec0f77-ae0e-4f7a-bcf6-d29a13fcbe4f"
+    }
+  ],
+
+  "r2_buckets": [
+    {
+      "binding": "INDEX",
+      "bucket_name": "hn-sidecar-index"
+    }
+  ]
+}

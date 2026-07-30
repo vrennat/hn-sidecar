@@ -1,0 +1,14 @@
+{
+  "name": "@hn-sidecar/d1-bench",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "fetch": "bun run src/fetch-chunk.ts",
+    "build-sql": "bun run src/build-sql.ts"
+  },
+  "dependencies": {
+    "@hn-sidecar/shared": "workspace:*",
+    "@hn-sidecar/toolkit": "workspace:*"
+  }
+}

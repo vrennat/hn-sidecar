@@ -1,0 +1,14 @@
+{
+  "name": "@hn-sidecar/publish",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "regen": "bun run src/regen.ts",
+    "verify": "bun run src/verify.ts"
+  },
+  "dependencies": {
+    "@hn-sidecar/shared": "workspace:*",
+    "@hn-sidecar/toolkit": "workspace:*"
+  }
+}

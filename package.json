@@ -1,0 +1,22 @@
+{
+  "name": "hn-sidecar",
+  "private": true,
+  "type": "module",
+  "description": "Find and read Hacker News discussions in a Chrome side panel.",
+  "license": "MIT",
+  "repository": "github:vrennat/hn-sidecar",
+  "workspaces": ["packages/*", "tools/*", "workers/*"],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json && tsc -p workers/tsconfig.json",
+    "build:extension": "bun run --cwd packages/extension build",
+    "package:extension": "bun run --cwd packages/extension package",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "@types/bun": "latest",
+    "@types/chrome": "^0.2.2",
+    "happy-dom": "^20.11.1",
+    "typescript": "^5.6.0"
+  }
+}

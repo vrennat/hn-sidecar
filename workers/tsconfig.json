@@ -1,0 +1,16 @@
+{
+  // Workers get their own pass rather than sharing the root config.
+  //
+  // `@cloudflare/workers-types` declares globals that collide with the DOM's by name
+  // and differ in shape — HTMLRewriter's `Element`, with a two-argument `append`, is
+  // the one that bites. Loading both into a single program silently gives the wrong
+  // `Element` to whichever code checked second, so the two worlds are kept apart:
+  // browser and bun code in the root config, worker code here. `packages/shared` is
+  // checked by both, on purpose — it has to compile under either.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": ["@cloudflare/workers-types"]
+  },
+  "include": ["*/src/**/*.ts"]
+}

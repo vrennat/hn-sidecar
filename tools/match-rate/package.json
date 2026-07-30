@@ -1,0 +1,15 @@
+{
+  "name": "@hn-sidecar/match-rate",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sample": "bun run src/sample.ts",
+    "measure": "bun run src/measure.ts",
+    "report": "bun run src/report.ts"
+  },
+  "dependencies": {
+    "@hn-sidecar/shared": "workspace:*",
+    "@hn-sidecar/toolkit": "workspace:*"
+  }
+}

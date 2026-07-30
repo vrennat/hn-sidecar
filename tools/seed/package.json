@@ -1,0 +1,14 @@
+{
+  "name": "@hn-sidecar/seed",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "crawl": "bun run src/crawl.ts",
+    "import": "bun run src/import.ts"
+  },
+  "dependencies": {
+    "@hn-sidecar/shared": "workspace:*",
+    "@hn-sidecar/toolkit": "workspace:*"
+  }
+}
