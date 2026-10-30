@@ -224,14 +224,20 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
   // Buckets the story previously occupied must be rewritten too, or a removed
   // variant lingers in a published shard. Collect them before the batch runs.
   if (stories.length > 0) {
-    const ids = stories.map((story) => story.id).filter((id): id is number => id !== undefined);
-    const placeholders = ids.map((_, index) => `?${index + 1}`).join(',');
-    const previousBuckets = await env.DB.prepare(
-      `SELECT DISTINCT bucket FROM story_hashes WHERE story_id IN (${placeholders})`,
-    )
-      .bind(...ids)
-      .all<{ bucket: number }>();
-    for (const row of previousBuckets.results) touched.add(row.bucket);
+    const ids = [...new Set(stories.map((story) => story.id).filter((id): id is number => id !== undefined))];
+    // D1 allows at most 100 bound parameters per statement. A catch-up tick or
+    // the 200-story refresh alone can exceed that and otherwise stall every cron
+    // before publishing shards or advancing the watermark.
+    for (let offset = 0; offset < ids.length; offset += BATCH_CHUNK) {
+      const slice = ids.slice(offset, offset + BATCH_CHUNK);
+      const placeholders = slice.map((_, index) => `?${index + 1}`).join(',');
+      const previousBuckets = await env.DB.prepare(
+        `SELECT DISTINCT bucket FROM story_hashes WHERE story_id IN (${placeholders})`,
+      )
+        .bind(...slice)
+        .all<{ bucket: number }>();
+      for (const row of previousBuckets.results) touched.add(row.bucket);
+    }
   }
 
   // Pack whole groups into batches without ever splitting one.
