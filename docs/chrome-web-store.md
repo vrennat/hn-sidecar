@@ -1,5 +1,10 @@
 # Chrome Web Store submission dossier
 
+[HN Sidecar on the Chrome Web Store](https://chromewebstore.google.com/detail/hn-sidecar/afgdpkifkpankhalmemgdpliheijpkap)
+is published as version 0.1.0, offered by vrennat (verified October 30, 2026).
+The public source is [vrennat/hn-sidecar](https://github.com/vrennat/hn-sidecar).
+The checklist below is reference material for future submissions.
+
 This file contains the copy and declarations for HN Sidecar 0.1.0. Keep the dashboard answers, `PRIVACY.md`, and extension behavior consistent.
 
 ## Listing copy

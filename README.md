@@ -3,6 +3,14 @@
 Shows the Hacker News discussion for the page you are on — inline comment threads
 in a Chrome side panel, not just a list of links.
 
+**[Install from the Chrome Web Store](https://chromewebstore.google.com/detail/hn-sidecar/afgdpkifkpankhalmemgdpliheijpkap)**
+· **[View the source on GitHub](https://github.com/vrennat/hn-sidecar)**
+· [Privacy policy](PRIVACY.md)
+
+Free and open source under the MIT license. After installing, pin HN Sidecar to
+Chrome's toolbar. An orange badge shows the comment count when a page has an HN
+discussion. Click the icon or press **Alt+H** to read it beside the article.
+
 HN Sidecar began as an MV3 rewrite of [HNewhere](https://github.com/twalichiewicz/HNewhere)
 by Thomas Walichiewicz, used and adapted under the MIT license.
 
@@ -37,7 +45,10 @@ The extension's only network origins:
 
 ## Status
 
-- Chrome MV3 extension, works loaded unpacked from `dist/`.
+- Published on the [Chrome Web Store](https://chromewebstore.google.com/detail/hn-sidecar/afgdpkifkpankhalmemgdpliheijpkap) (version 0.1.0).
+- Chrome MV3 extension; developers can also load `packages/extension/dist/` unpacked.
+- Source includes a 0.1.1 candidate with panel accessibility and narrow-layout fixes;
+  these UI changes are not in the published 0.1.0 package yet.
 - Index writer (Worker + D1 + R2) is operational on `hn-index.tanner.place`.
 - Cloudflare caches shards for six hours and `manifest.json` and `recent.json`
   for five minutes; repeated GET requests return `cf-cache-status: HIT`.
