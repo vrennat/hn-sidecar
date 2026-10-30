@@ -105,7 +105,8 @@ const buildRow = (
   const element = document.createElement('div');
   element.className = row.dim ? 'row dim' : 'row';
   element.dataset['index'] = String(index);
-  element.style.marginLeft = `${Math.min(row.depth, 13) * MAX_INDENT_PX}px`;
+  // Leave room for text even in Chrome's narrow side panel.
+  element.style.marginLeft = `min(${Math.min(row.depth, 13) * MAX_INDENT_PX}px, 28%)`;
 
   const replies = descendantCount(rows, index);
 
@@ -114,6 +115,8 @@ const buildRow = (
   toggle.type = 'button';
   toggle.textContent = '–';
   toggle.title = replies === 0 ? 'Collapse' : `Collapse ${replies} ${replies === 1 ? 'reply' : 'replies'}`;
+  toggle.setAttribute('aria-label', `Collapse comment by ${row.author ?? 'unknown'}`);
+  toggle.setAttribute('aria-expanded', 'true');
 
   const meta = document.createElement('div');
   meta.className = 'meta';
@@ -136,6 +139,8 @@ const buildRow = (
     else collapsed.add(index);
     element.classList.toggle('collapsed', !isCollapsed);
     toggle.textContent = isCollapsed ? '–' : '+';
+    toggle.setAttribute('aria-expanded', String(isCollapsed));
+    toggle.setAttribute('aria-label', `${isCollapsed ? 'Collapse' : 'Expand'} comment by ${row.author ?? 'unknown'}`);
     count.textContent = !isCollapsed && replies > 0 ? `${replies} ${replies === 1 ? 'reply' : 'replies'}` : '';
     applyVisibility();
   });

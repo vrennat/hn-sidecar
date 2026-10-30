@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "HN Sidecar",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Find and read Hacker News discussions for the page in your active tab.",
   "permissions": ["tabs", "storage", "sidePanel"],
   "host_permissions": ["https://news.ycombinator.com/*", "https://hn-index.tanner.place/*"],

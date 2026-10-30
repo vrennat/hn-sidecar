@@ -2,15 +2,21 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>HN Sidecar</title>
     <link rel="stylesheet" href="panel.css" />
   </head>
   <body>
     <header id="header">
       <h1>HN Sidecar</h1>
-      <p id="status" class="notice">Checking this page…</p>
+      <p id="status" class="notice" role="status">Checking this page…</p>
     </header>
     <main id="submissions" class="scroller"></main>
+    <footer>
+      <a href="https://github.com/vrennat/hn-sidecar" target="_blank" rel="noopener noreferrer">Source code</a>
+      <a href="https://github.com/vrennat/hn-sidecar/issues" target="_blank" rel="noopener noreferrer">Help</a>
+      <a href="https://chromewebstore.google.com/detail/hn-sidecar/afgdpkifkpankhalmemgdpliheijpkap" target="_blank" rel="noopener noreferrer">Chrome Web Store</a>
+    </footer>
     <script type="module" src="panel.js"></script>
   </body>
 </html>

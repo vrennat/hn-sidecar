@@ -97,12 +97,16 @@ const buildSubmission = (submission: Submission, startExpanded: boolean): HTMLEl
 
   const thread = document.createElement('div');
   thread.className = 'thread';
+  thread.id = `thread-${submission.id}`;
   thread.hidden = true;
+  head.setAttribute('aria-controls', thread.id);
+  head.setAttribute('aria-expanded', 'false');
 
   let loaded = false;
   const expand = (): void => {
     loaded = true;
     thread.hidden = false;
+    head.setAttribute('aria-expanded', 'true');
     const loading = document.createElement('p');
     loading.className = 'notice';
     loading.textContent = 'Loading thread…';
@@ -136,6 +140,7 @@ const buildSubmission = (submission: Submission, startExpanded: boolean): HTMLEl
       return;
     }
     thread.hidden = !thread.hidden;
+    head.setAttribute('aria-expanded', String(!thread.hidden));
   });
 
   // The most recent discussion opens expanded: it is what the badge's number almost
