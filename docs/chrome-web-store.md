@@ -11,7 +11,7 @@ This file contains the copy and declarations for HN Sidecar 0.1.0. Keep the dash
 
 **Name:** HN Sidecar
 
-**Category:** Productivity
+**Category:** Communication
 
 **Language:** English (United States)
 

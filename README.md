@@ -49,12 +49,14 @@ The extension's only network origins:
 - Chrome MV3 extension; developers can also load `packages/extension/dist/` unpacked.
 - Source includes a 0.1.1 candidate with panel accessibility and narrow-layout fixes;
   these UI changes are not in the published 0.1.0 package yet.
-- Index writer (Worker + D1 + R2) is operational on `hn-index.tanner.place`.
+- The default hosted index (Worker + D1 + R2) is at `hn-index.tanner.place`.
 - Cloudflare caches shards for six hours and `manifest.json` and `recent.json`
   for five minutes; repeated GET requests return `cf-cache-status: HIT`.
 
 ## Limitations
 
+- Index coverage is not exhaustive, and ingestion can lag while catching up.
+  A missing match does not prove a page has never been discussed on HN.
 - Chrome 114+ only (MV3). Firefox, Safari, and mobile are not currently supported.
 - URL normalization is aggressive on tracking parameters and conservative on
   unknown ones. Some miss rate is inherent — sites rewriting their own paths
