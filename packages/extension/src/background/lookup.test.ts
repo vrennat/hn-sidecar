@@ -1,15 +1,11 @@
-import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { hashUrl } from '@hn-sidecar/shared';
 import { lookupUrl } from './lookup.ts';
 
 const originalFetch = globalThis.fetch;
 const originalChrome = globalThis.chrome;
-let clock = Date.now();
-let restoreClock: ReturnType<typeof spyOn>;
 beforeEach(() => {
-  // Expire the actual session-cache memory between cases without mocking modules.
-  clock += 2 * 3600_000;
-  restoreClock = spyOn(Date, 'now').mockReturnValue(clock);
+  // Each case explicitly revalidates fixtures; shared caches may be warm from another suite.
   globalThis.chrome = { storage: { session: {
     async get() { return {}; }, async set() {}, async remove() {},
   } } } as unknown as typeof chrome;
@@ -17,7 +13,6 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = originalFetch;
   globalThis.chrome = originalChrome;
-  restoreClock.mockRestore();
 });
 
 const url = 'https://example.org/new-discussion';
@@ -34,7 +29,7 @@ const serve = (recent: () => Response, manifest = { av: 1, nv: 1 }) => {
 
 test('new discussion matches through recent index while its shard is still cached empty', async () => {
   serve(() => Response.json({ av: 1, nv: 1, entries: [entry] }));
-  const finding = await lookupUrl(url);
+  const finding = await lookupUrl(url, true);
   expect(finding.source).toBe('index');
   expect(finding.submissions.map((s) => s.id)).toEqual([123]);
   expect(finding.totalComments).toBe(4);
@@ -42,22 +37,22 @@ test('new discussion matches through recent index while its shard is still cache
 
 test('recent-index outage is a lookup error rather than a false no-discussion result', async () => {
   serve(() => new Response('unavailable', { status: 503 }));
-  const finding = await lookupUrl(url);
+  const finding = await lookupUrl(url, true);
   expect(finding.source).toBe('error');
   expect(finding.detail).toContain('recent.json');
 });
 
 test('incompatible recent index asks for an update', async () => {
   serve(() => Response.json({ av: 1, nv: 2, entries: [] }));
-  expect((await lookupUrl(url)).source).toBe('version-skew');
+  expect((await lookupUrl(url, true)).source).toBe('version-skew');
 });
 
 test('incompatible manifest artifact version asks for an update', async () => {
   serve(() => Response.json({ av: 1, nv: 1, entries: [] }), { av: 2, nv: 1 });
-  expect((await lookupUrl(url)).source).toBe('version-skew');
+  expect((await lookupUrl(url, true)).source).toBe('version-skew');
 });
 
 test('successful compatible empty artifacts still report no discussion', async () => {
   serve(() => Response.json({ av: 1, nv: 1, entries: [] }));
-  expect((await lookupUrl(url)).source).toBe('none');
+  expect((await lookupUrl(url, true)).source).toBe('none');
 });
