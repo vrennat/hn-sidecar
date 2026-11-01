@@ -65,11 +65,6 @@ h1 {
   padding: 8px 12px 24px;
 }
 
-.summary {
-  margin: 6px 0 0;
-  font-weight: 600;
-}
-
 .submission {
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -193,4 +188,48 @@ footer {
 .footer-link {
   display: inline-block;
   margin-top: 6px;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+button:disabled {
+  cursor: progress;
+  opacity: 0.65;
+}
+#refresh {
+  float: right;
+  margin-left: 10px;
+}
+#refresh,
+.thread-controls button {
+  min-height: 28px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 3px 8px;
+}
+.guide {
+  margin: 0;
+  padding: 8px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.thread-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-bottom: 8px;
+}
+.thread-controls .notice {
+  margin: 0;
+  flex-basis: 100%;
+}
+#detail {
+  overflow-wrap: anywhere;
+  font-size: 11px;
 }

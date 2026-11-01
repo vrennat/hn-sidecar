@@ -108,3 +108,11 @@ describe('descendantCount', () => {
     expect(covered).toBe(thread.rows.length);
   });
 });
+
+describe('empty discussion', () => {
+  it('recognizes HN’s discuss link as zero comments without treating malformed pages as empty', () => {
+    const html = '<table><tr><td class="titleline"><a>Story</a></td></tr><tr><td class="subtext"><a href="item?id=123">discuss</a></td></tr></table>';
+    expect(parseThread(html, 123).comments).toBe(0);
+    expect(parseThread('<html>unexpected response</html>', 123).comments).toBeNull();
+  });
+});

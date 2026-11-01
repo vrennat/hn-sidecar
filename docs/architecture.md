@@ -53,7 +53,7 @@ tools/toolkit/            shared CLI argument parsing
 
 ### Navigation
 
-The background service worker listens for completed HTTP(S) tab navigations. Each tab gets an independent finding and badge. Sequence guards prevent a slow lookup for a previous page from overwriting a newer navigation's result.
+The background service worker listens for completed HTTP(S) tab navigations. Each tab gets an independent finding and badge. Sequence guards prevent a slow lookup for a previous page from overwriting a newer navigation's result. Badge writes are serialized per tab because Chrome exposes count, color, and title as three separate asynchronous operations. The panel separately guards tab queries and lookup results; a same-page no-op cannot cancel an explicit refresh.
 
 There are two discovery paths.
 
@@ -110,7 +110,11 @@ The parser turns HN's flat comment rows and indentation levels into a flat typed
 
 Comment bodies are never inserted with `innerHTML`. The sanitizer rebuilds text and a small allowlist of HN elements, validates link protocols, replaces link relationships, and drops executable or embedding elements entirely.
 
-Thread HTML is cached in IndexedDB with a roughly 40 MB LRU cap. Stories younger than 24 hours use a 10-minute TTL; older stories use a 30-day TTL.
+Thread HTML is cached in IndexedDB with an approximately 40 MB body cap, estimated conservatively as UTF-16 string bytes. Stories younger than 24 hours **when fetched** use a 10-minute TTL; older stories use 30 days. Expiry is fixed at fetch time, including for legacy records, so a story crossing 24 hours cannot extend an existing cache entry. Explicit Refresh comments bypasses the cache for active old discussions.
+
+IndexedDB v2 separates small eviction metadata from HTML bodies. Pruning reads metadata only; HTML and metadata update in one transaction. Connections close after every operation. A blocked upgrade or storage/quota failure is a cache miss and permits the anonymous network path. Version-1 records migrate locally. Detached thread views disconnect their IntersectionObservers.
+
+Public thread prefetches and opens share in-flight requests. A forced refresh supersedes an ordinary request; a late prefetch cannot repopulate old retained HTML. Known HTTP failures are surfaced for retry rather than automatically issuing a second identical request from the panel. A direct anonymous fetch remains a fallback only when the worker cannot answer.
 
 ## Index write path
 
@@ -125,13 +129,21 @@ The public extension does not need a local seed or Cloudflare account; it uses t
 The Worker runs every 10 minutes. It:
 
 1. Reads HN's current `maxitem` and the stored watermark.
-2. Fetches new item IDs plus the small `/updates.json` set.
+2. Fetches new item IDs plus the small `/updates.json` set, and up to 100 IDs
+   each from `/newstories.json` and `/topstories.json`. These public feeds keep
+   current discussions discoverable during historical catch-up and refresh active
+   stories' engagement. IDs are deduplicated across all sources and rolling refresh.
 3. Upserts URL-bearing stories into D1.
 4. Replaces each changed story's digest rows.
 5. Rewrites both newly touched and previously occupied shards.
 6. Publishes the 48-hour recent index.
 7. Writes the manifest last.
 8. Advances the watermark.
+
+Only the contiguous historical range advances the watermark; live-feed IDs never
+skip the backlog. Upstream HTTP/parse failures abort before database or artifact
+writes, leaving the cursor in place for the next tick. The feed caps bound work;
+they do not guarantee exhaustive coverage through a prolonged ingestion outage.
 
 Replacing old digest rows and rewriting previous buckets is necessary because moderators can retarget a story URL. Otherwise the old URL would continue matching indefinitely.
 
@@ -165,7 +177,23 @@ Intended origin metadata:
 
 The Cloudflare custom-domain Cache Rule must mark the hostname eligible for caching while respecting existing origin headers for both Edge TTL and Browser TTL. Overriding volatile artifacts to a multi-hour browser TTL prevents `recent.json` from covering newly submitted stories.
 
-Inside the extension, session caches use shorter TTLs: five minutes for manifest/recent, one hour for shards, and 30 minutes for per-tab findings and HN link-map entries.
+Inside the extension, session caches use these TTLs:
+
+| Local cache | TTL |
+|---|---|
+| Manifest / recent index | 5 minutes |
+| Shard | 1 hour |
+| Matching finding / HN link map | 30 minutes |
+| No-match finding | 1 minute |
+| Failed finding | 15 seconds |
+
+The worker hydrates session storage once per lifetime and serializes cache mutations. Eviction includes records from previous worker lifetimes: at most 400 link-map entries, 64 findings, and 96 artifact entries. Expired and closed-tab records are removed from memory and session storage. Storage failure falls back to bounded memory.
+
+Check again bypasses the finding/link-map and local artifact caches, using Fetch `cache: reload` with credentials omitted. It does not add cache-busting URL parameters or send the page URL; CDN publication and normal edge caching can still delay newly indexed stories. Concurrent forced refreshes join, and superseded ordinary responses cannot overwrite their cache result.
+
+The recent index is required for a complete lookup. If it cannot be fetched, the
+extension shows a lookup error instead of a confident negative based on a cached
+shard alone. Manifest, recent and shard versions are checked before matching.
 
 ## Privacy and security boundaries
 
@@ -190,3 +218,10 @@ See [`PRIVACY.md`](../PRIVACY.md) for the user-facing disclosure.
 - **HN HTML is an external contract.** Parser fixtures and sanitizer tests reduce risk, but HN markup changes can require an extension update.
 - **Chrome is the current platform.** The side-panel API requires Chrome 114 or newer. Firefox, Safari, and mobile are not currently supported.
 - **Self-hosting is operator-oriented, not one-command.** It requires Cloudflare D1, R2, Workers, a historical seed, full regeneration, custom-domain caching, and replacement of the extension's index origin and host permission.
+
+
+## Panel recovery and verification
+
+The panel retains expanded comments and scroll position when a same-page recheck returns identical submissions. Failed refreshes leave earlier results readable and say they are older. Counts parsed from public HN HTML update the thread heading and total consistently. Every thread offers Refresh comments and Open on HN; comment ages are permalinks. Zero-comment `discuss` pages are distinguished from unrecognized HTML, which is not cached as a valid thread. Cache timestamps include a date when needed.
+
+Tests cover delayed tab queries/lookups, navigation during initial load, repeated refresh and unrelated events, retry and preserved views, disclosure/focus semantics, relative link resolution, fixed expiry, v1 migration, blocked storage upgrades, metadata eviction, MV3 restart caps, closed tabs, delayed badge writes, and prefetch/refresh ordering. Fake IndexedDB is a development-only dependency. DOM tests do not substitute for testing actual Chrome keyboard behavior and side-panel sizing before Store submission.

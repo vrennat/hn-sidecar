@@ -19,15 +19,29 @@ const formatCount = (count: number): string => {
   return `${thousands < 10 ? thousands.toFixed(1).replace(/\.0$/, '') : Math.round(thousands)}k`;
 };
 
-export const applyBadge = async (tabId: number, finding: Finding | null): Promise<void> => {
-  const { text, color, title } = describe(finding);
-  try {
-    await chrome.action.setBadgeText({ tabId, text });
-    await chrome.action.setBadgeBackgroundColor({ tabId, color });
-    await chrome.action.setTitle({ tabId, title });
-  } catch {
-    // The tab can close between the lookup finishing and the badge being set.
-  }
+const pending = new Map<number, Promise<void>>();
+
+export const applyBadge = (tabId: number, finding: Finding | null, current = () => true): Promise<void> => {
+  // Chrome exposes three independent async writes. Serialize per tab so a late old
+  // title cannot follow a new count; unrelated tabs remain independent.
+  const run = (pending.get(tabId) ?? Promise.resolve())
+    .then(async () => {
+      const { text, color, title } = describe(finding);
+      if (!current()) return;
+      await chrome.action.setBadgeText({ tabId, text });
+      if (!current()) return;
+      await chrome.action.setBadgeBackgroundColor({ tabId, color });
+      if (!current()) return;
+      await chrome.action.setTitle({ tabId, title });
+    })
+    .catch(() => {
+      /* A tab may close during any of the writes. */
+    });
+  pending.set(tabId, run);
+  void run.finally(() => {
+    if (pending.get(tabId) === run) pending.delete(tabId);
+  });
+  return run;
 };
 
 const describe = (finding: Finding | null): { text: string; color: string; title: string } => {

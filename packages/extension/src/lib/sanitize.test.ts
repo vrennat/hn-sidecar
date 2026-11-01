@@ -106,3 +106,14 @@ describe('sanitizeBody', () => {
     });
   });
 });
+
+describe('resolved comment links', () => {
+  it('uses HN for relative and root-relative links, and HTTPS for protocol-relative links', () => {
+    expect(render('<a href="item?id=123">discussion</a>')).toContain('href="https://news.ycombinator.com/item?id=123"');
+    expect(render('<a href="/user?id=alice">author</a>')).toContain('href="https://news.ycombinator.com/user?id=alice"');
+    expect(render('<a href="//example.com/path">site</a>')).toContain('href="https://example.com/path"');
+  });
+  it('does not turn missing/blank hrefs into links to the extension or HN homepage', () => {
+    expect(render('<a>label</a><a href="  ">blank</a>')).not.toContain('href=');
+  });
+});

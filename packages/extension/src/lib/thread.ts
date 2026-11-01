@@ -92,14 +92,14 @@ export const parseThread = (html: string, storyId: number): Thread => {
 
   const subtext = doc.querySelector('.subtext');
   const commentLink =
-    subtext === null ? undefined : [...subtext.querySelectorAll('a')].find((a) => /\bcomments?\b/.test(a.textContent ?? ''));
+    subtext === null ? undefined : [...subtext.querySelectorAll('a')].find((a) => /\bcomments?\b|^\s*discuss\s*$/.test(a.textContent ?? ''));
 
   return {
     storyId,
     title: titleLink?.textContent?.trim() ?? null,
     storyUrl: titleLink?.getAttribute('href') ?? null,
     points: parseCountOrNull(subtext?.querySelector('.score')?.textContent),
-    comments: parseCountOrNull(commentLink?.textContent),
+    comments: commentLink?.textContent?.trim() === 'discuss' ? 0 : parseCountOrNull(commentLink?.textContent),
     rows,
   };
 };

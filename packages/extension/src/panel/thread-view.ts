@@ -32,7 +32,7 @@ const relativeAge = (ts: number, fallback: string | null): string => {
   return 'just now';
 };
 
-export const renderThread = (thread: Thread, host: HTMLElement): void => {
+export const renderThread = (thread: Thread, host: HTMLElement): (() => void) => {
   host.textContent = '';
 
   if (thread.rows.length === 0) {
@@ -40,9 +40,10 @@ export const renderThread = (thread: Thread, host: HTMLElement): void => {
     // nothing, so say so and hand over a link rather than showing an empty thread.
     const empty = document.createElement('p');
     empty.className = 'notice';
-    empty.textContent = 'No comments could be read from this thread.';
-    host.append(empty, hnLink(thread.storyId, 'Open it on HN'));
-    return;
+    empty.textContent =
+      thread.comments === 0 ? 'No comments yet.' : 'Comments could not be read. Open this thread on HN.';
+    host.append(empty);
+    return () => {};
   }
 
   const collapsed = new Set<number>();
@@ -93,6 +94,7 @@ export const renderThread = (thread: Thread, host: HTMLElement): void => {
   });
   host.append(fragment);
   applyVisibility();
+  return () => observer.disconnect();
 };
 
 const buildRow = (
@@ -128,7 +130,9 @@ const buildRow = (
   age.textContent = relativeAge(row.ts, row.ageText);
   const count = document.createElement('span');
   count.className = 'replies';
-  meta.append(toggle, author, age, count);
+  const permalink = hnLink(row.id, age.textContent || 'Comment');
+  permalink.setAttribute('aria-label', `Open comment by ${row.author ?? 'unknown'} on HN`);
+  meta.append(toggle, author, permalink, count);
 
   const body = document.createElement('div');
   body.className = 'body';

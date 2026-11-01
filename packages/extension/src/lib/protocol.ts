@@ -64,11 +64,11 @@ export type Request =
    * "the active tab" independently: two resolutions of the active tab can disagree
    * mid-switch, and the panel is the one that has to stay consistent with what it drew.
    */
-  | { readonly type: 'get-finding'; readonly tabId: number }
-  | { readonly type: 'get-thread-html'; readonly id: number };
+  | { readonly type: 'get-finding'; readonly tabId: number; readonly refresh?: boolean }
+  | { readonly type: 'get-thread-html'; readonly id: number; readonly refresh?: boolean };
 
 export type ThreadHtmlResponse =
-  | { readonly ok: true; readonly html: string; readonly prefetched: boolean }
+  | { readonly ok: true; readonly html: string; readonly prefetched: boolean; readonly fetchedAt?: number }
   | { readonly ok: false; readonly error: string };
 
 export const emptyFinding = (url: string, source: FindingSource, detail?: string): Finding => ({

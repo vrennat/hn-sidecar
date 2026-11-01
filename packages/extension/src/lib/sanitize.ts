@@ -37,12 +37,13 @@ const DROPPED_TAGS = new Set([
   'TITLE',
 ]);
 
-const isSafeHref = (href: string): boolean => {
+const safeHref = (href: string): string | null => {
   try {
-    const { protocol } = new URL(href, 'https://news.ycombinator.com/');
-    return protocol === 'https:' || protocol === 'http:';
+    if (!href.trim()) return null;
+    const url = new URL(href, 'https://news.ycombinator.com/');
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : null;
   } catch {
-    return false;
+    return null;
   }
 };
 
@@ -65,8 +66,8 @@ const rebuild = (source: Node, target: Node, doc: Document): void => {
 
     const created = doc.createElement(element.tagName.toLowerCase());
     if (element.tagName === 'A') {
-      const href = element.getAttribute('href') ?? '';
-      if (isSafeHref(href)) {
+      const href = safeHref(element.getAttribute('href') ?? '');
+      if (href !== null) {
         const anchor = created as HTMLAnchorElement;
         anchor.href = href;
         anchor.target = '_blank';

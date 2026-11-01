@@ -13,7 +13,7 @@ import { totalComments } from '../lib/submissions.ts';
 import { applyBadge } from './badge.ts';
 import { lookupLinkMap, rememberListing } from './link-map.ts';
 import { lookupUrl } from './lookup.ts';
-import { cacheGet, cacheSet } from './session-cache.ts';
+import { cacheDelete, cacheGet, cacheSet } from './session-cache.ts';
 import { prefetchThread, takeThread } from './thread-source.ts';
 
 const FINDING_TTL_MS = 30 * 60_000;
@@ -38,7 +38,12 @@ const isHn = (url: string): boolean => url.startsWith(`${HN_ORIGIN}/`);
  */
 const navigating = new Map<
   number,
-  { readonly url: string | undefined; readonly seq: number; readonly run: Promise<Finding | null> }
+  {
+    readonly url: string | undefined;
+    readonly seq: number;
+    readonly refresh: boolean;
+    readonly run: Promise<Finding | null>;
+  }
 >();
 
 let nextSeq = 1;
@@ -52,14 +57,16 @@ let nextSeq = 1;
  */
 const isCurrent = (tabId: number, seq: number): boolean => navigating.get(tabId)?.seq === seq;
 
-const navigate = (tabId: number, url: string | undefined): Promise<Finding | null> => {
+const navigate = (tabId: number, url: string | undefined, refresh = false): Promise<Finding | null> => {
   const pending = navigating.get(tabId);
-  if (pending !== undefined && pending.url === url) return pending.run;
+  if (pending !== undefined && pending.url === url && (!refresh || pending.refresh)) return pending.run;
   const seq = nextSeq++;
-  const run = handleNavigation(tabId, url, seq).finally(() => {
-    if (isCurrent(tabId, seq)) navigating.delete(tabId);
-  });
-  navigating.set(tabId, { url, seq, run });
+  const run = Promise.resolve()
+    .then(() => handleNavigation(tabId, url, seq, refresh))
+    .finally(() => {
+      if (isCurrent(tabId, seq)) navigating.delete(tabId);
+    });
+  navigating.set(tabId, { url, seq, refresh, run });
   return run;
 };
 
@@ -67,10 +74,11 @@ const handleNavigation = async (
   tabId: number,
   url: string | undefined,
   seq: number,
+  refresh: boolean,
 ): Promise<Finding | null> => {
   if (url === undefined || !/^https?:/.test(url)) {
-    await applyBadge(tabId, null);
-    return null;
+    if (isCurrent(tabId, seq)) await applyBadge(tabId, null, () => isCurrent(tabId, seq));
+    return emptyFinding(url ?? '', 'unhashable');
   }
 
   /**
@@ -84,12 +92,14 @@ const handleNavigation = async (
    */
   if (isHn(url)) {
     const finding = emptyFinding(url, 'on-hn');
+    if (!isCurrent(tabId, seq)) return finding;
     await cacheSet(findingKey(tabId), finding, FINDING_TTL_MS);
-    await applyBadge(tabId, finding);
+    if (!isCurrent(tabId, seq)) return finding;
+    await applyBadge(tabId, finding, () => isCurrent(tabId, seq));
     return finding;
   }
 
-  const known = await lookupLinkMap(url);
+  const known = refresh ? null : await lookupLinkMap(url);
   const finding: Finding =
     known !== null
       ? {
@@ -100,24 +110,18 @@ const handleNavigation = async (
           totalComments: totalComments(known),
           checkedAt: Date.now(),
         }
-      : await lookupUrl(url);
+      : await lookupUrl(url, refresh);
 
-  // The fetches above are the only multi-second gap in this function — the whole orphan
-  // window lives here. By the time they resolve, a faster navigation may have bumped
-  // `seq`; if so, this run is answering about a page the user has left, and letting it
-  // write would overwrite the current page's badge and finding cache. The finding is still
-  // correct for any caller awaiting *this* run (a `get-finding` that asked for this URL),
-  // so it is returned; only the shared, tab-scoped writes are skipped.
-  //
-  // The non-http and on-hn branches above are deliberately unguarded: they reach their
-  // writes within the function's synchronous prefix or after a single sub-millisecond
-  // session-storage IPC, so no second navigation can interleave in time to supersede them.
-  // `isCurrent` is also not valid there — `navigate` does not `set` this run's entry until
-  // this function hits its first `await`, which for those branches is the write itself.
+  // A navigation can supersede this result during any awaited browser operation.
   if (!isCurrent(tabId, seq)) return finding;
 
-  await cacheSet(findingKey(tabId), finding, FINDING_TTL_MS);
-  await applyBadge(tabId, finding);
+  await cacheSet(
+    findingKey(tabId),
+    finding,
+    finding.source === 'error' ? 15_000 : finding.source === 'none' ? 60_000 : FINDING_TTL_MS,
+  );
+  if (!isCurrent(tabId, seq)) return finding;
+  await applyBadge(tabId, finding, () => isCurrent(tabId, seq));
   return finding;
 };
 
@@ -138,7 +142,7 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   navigating.delete(tabId);
-  void chrome.storage.session.remove(findingKey(tabId));
+  void cacheDelete(findingKey(tabId));
 });
 
 chrome.runtime.onMessage.addListener((message: Request, sender, sendResponse) => {
@@ -166,18 +170,18 @@ chrome.runtime.onMessage.addListener((message: Request, sender, sendResponse) =>
         // a miss. The mismatch path also starts the lookup — often ahead of
         // `tabs.onUpdated` 'complete', which is a free head start.
         const cached = await cacheGet<Finding>(findingKey(tabId));
-        if (cached !== null && cached.url === url) {
+        if (!message.refresh && cached !== null && cached.url === url) {
           sendResponse(cached);
           return;
         }
         // The worker may have been started by the panel opening, after the navigation
         // that would have populated this was handled by a worker that has since died.
-        sendResponse(await navigate(tabId, url));
-      })();
+        sendResponse(await navigate(tabId, url, message.refresh));
+      })().catch((error: unknown) => sendResponse(emptyFinding('', 'error', String(error))));
       return true;
     }
     case 'get-thread-html': {
-      void takeThread(message.id).then(
+      void takeThread(message.id, message.refresh).then(
         (result) => sendResponse({ ok: true, ...result } satisfies ThreadHtmlResponse),
         (error: unknown) =>
           sendResponse({

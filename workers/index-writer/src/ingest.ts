@@ -1,7 +1,7 @@
 /**
  * Ingest cron, every 10 minutes.
  *
- * Polls Firebase for changed items and the maxitem watermark, upserts into D1,
+ * Polls Firebase's latest/front-page feeds, changed items and maxitem watermark, upserts into D1,
  * rewrites only the touched shards, then rewrites `recent.json`. Everything is
  * idempotent: a failed run is simply retried by the next tick, and a partially
  * applied run leaves D1 and the shards consistent because shards are always
@@ -31,6 +31,11 @@ const BATCH_CHUNK = 100;
 
 /** Cap on changed items examined per run. `updates.json` is typically ~100 ids. */
 const MAX_CHANGED = 600;
+
+// Keep today's stories discoverable even when the sequential watermark is months
+// behind. These public feeds do not move that cursor. The front page also refreshes
+// engagement on active discussions without waiting for the historical rotation.
+const LIVE_FEED_LIMIT = 100;
 
 const RECENT_WINDOW_SECONDS = 48 * 3600;
 const RECENT_MAX_ENTRIES = 5_000;
@@ -75,7 +80,9 @@ export interface IngestResult {
 
 const getJson = async <T>(url: string): Promise<T | null> => {
   const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-  if (!response.ok) return null;
+  // A failed item fetch must fail the tick before its watermark advances. Treating
+  // a 503 as a missing item permanently skips that ID on the next run.
+  if (!response.ok) throw new Error(`GET ${url} -> ${response.status}`);
   return (await response.json()) as T | null;
 };
 
@@ -110,8 +117,18 @@ const isStoryWithUrl = (item: FirebaseItem | null): boolean => {
 };
 
 export const ingest = async (env: Env): Promise<IngestResult> => {
-  const maxItem = (await getJson<number>(`${FIREBASE}/maxitem.json`)) ?? 0;
+  const maxItem = await getJson<number>(`${FIREBASE}/maxitem.json`);
+  if (maxItem === null || !Number.isSafeInteger(maxItem) || maxItem < 1) {
+    throw new Error('Firebase maxitem is not a positive integer');
+  }
   const updates = await getJson<{ items?: number[] }>(`${FIREBASE}/updates.json`);
+  const liveFeeds = await Promise.all(
+    ['newstories', 'topstories'].map(async (feed) => {
+      const ids = await getJson<number[]>(`${FIREBASE}/${feed}.json`);
+      if (!Array.isArray(ids)) throw new Error(`Firebase ${feed} is not an ID list`);
+      return ids.slice(0, LIVE_FEED_LIMIT).filter((id) => Number.isSafeInteger(id) && id > 0);
+    }),
+  );
 
   const previous = await readWatermark(env);
   // First run on an imported seed: start from the current tip rather than
@@ -121,7 +138,7 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
 
   const newIds = from <= to ? Array.from({ length: to - from + 1 }, (_, offset) => from + offset) : [];
   const changedIds = (updates?.items ?? []).slice(0, MAX_CHANGED);
-  const candidates = [...new Set([...newIds, ...changedIds])];
+  const candidates = [...new Set([...newIds, ...changedIds, ...liveFeeds.flat()])];
 
   const items = await mapLimit(candidates, FETCH_CONCURRENCY, (id) =>
     getJson<FirebaseItem>(`${FIREBASE}/item/${id}.json`),
@@ -148,16 +165,21 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
   )
     .bind(REFRESH_BATCH)
     .all<{ id: number; url: string; title: string; score: number; descendants: number }>();
+  const fetched = new Map(candidates.map((id, index) => [id, items[index]]));
   const staleItems = await mapLimit(stalest.results, FETCH_CONCURRENCY, (row) =>
-    getJson<FirebaseItem>(`${FIREBASE}/item/${row.id}.json`),
+    fetched.has(row.id)
+      ? Promise.resolve(fetched.get(row.id) ?? null)
+      : getJson<FirebaseItem>(`${FIREBASE}/item/${row.id}.json`),
   );
 
   const refreshedStories: FirebaseItem[] = [];
   const bumpRefreshed: number[] = [];
   stalest.results.forEach((stored, index) => {
+    // Already handled by the new/changed/live pass, including its refresh time.
+    if (fetched.has(stored.id) && isStoryWithUrl(fetched.get(stored.id) ?? null)) return;
     const item = staleItems[index];
-    // Transient failure (non-200 / timeout / parse): leave the row stalest so it
-    // retries next tick instead of freezing stale counts for a full cycle.
+    // A null Firebase item is not confirmed gone: leave it stalest for a retry.
+    // Transport/parse failures reject earlier, before any writes or cursor advance.
     if (item === null || item === undefined) return;
     // Dead/deleted/no-url: confirmed gone, rotate out of the queue permanently.
     if (!isStoryWithUrl(item)) {

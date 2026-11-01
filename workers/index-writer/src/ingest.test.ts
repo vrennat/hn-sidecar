@@ -37,6 +37,7 @@ test('catch-up ingestion chunks old-bucket lookups within D1 limits and publishe
     const url = String(input);
     if (url.endsWith('/maxitem.json')) return Response.json(1125);
     if (url.endsWith('/updates.json')) return Response.json({ items: [] });
+    if (url.endsWith('/newstories.json') || url.endsWith('/topstories.json')) return Response.json([]);
     const id = Number(url.match(/item\/(\d+)/)?.[1]);
     return Response.json({ id, type: 'story', url: `https://example.com/${id}`, title: `Story ${id}`, time: 1785500000 });
   }) as typeof fetch;

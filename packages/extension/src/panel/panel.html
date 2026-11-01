@@ -9,13 +9,21 @@
   <body>
     <header id="header">
       <h1>HN Sidecar</h1>
+      <button id="refresh" type="button">Check again</button>
       <p id="status" class="notice" role="status">Checking this page…</p>
+      <p id="checked" class="notice"></p>
+      <p id="detail" class="notice" hidden></p>
     </header>
+    <p class="guide">
+      Open an article, then click the toolbar icon or press <kbd>Alt+H</kbd>. Matching stays on your device.
+    </p>
     <main id="submissions" class="scroller"></main>
     <footer>
       <a href="https://github.com/vrennat/hn-sidecar" target="_blank" rel="noopener noreferrer">Source code</a>
       <a href="https://github.com/vrennat/hn-sidecar/issues" target="_blank" rel="noopener noreferrer">Help</a>
-      <a href="https://chromewebstore.google.com/detail/hn-sidecar/afgdpkifkpankhalmemgdpliheijpkap" target="_blank" rel="noopener noreferrer">Chrome Web Store</a>
+      <a href="https://github.com/vrennat/hn-sidecar/blob/main/PRIVACY.md" target="_blank" rel="noopener noreferrer"
+        >Privacy</a
+      >
     </footer>
     <script type="module" src="panel.js"></script>
   </body>

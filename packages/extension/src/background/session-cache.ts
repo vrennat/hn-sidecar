@@ -1,92 +1,97 @@
-/**
- * A TTL cache that survives service-worker termination.
- *
- * MV3 kills the worker after ~30 s idle, so a plain `Map` is emptied several times
- * an hour during normal browsing. Every miss here is a network request that leaks a
- * little more shard-fetch volume than it needs to, so the cache is mirrored
- * into `chrome.storage.session` — cleared when the browser closes, never written to
- * disk, and not readable by content scripts under the default access level.
- */
-
+/** Session-only cache. Hydrate once per worker so eviction includes previous lifetimes. */
 interface Entry<T> {
   readonly value: T;
   readonly expiresAt: number;
 }
+type Storage = Pick<chrome.storage.StorageArea, 'get' | 'set' | 'remove'>;
+const CAPS: Record<string, number> = { 'linkmap:': 400, 'finding:': 64 };
+const namespaceOf = (key: string): string => (key.includes(':') ? key.slice(0, key.indexOf(':') + 1) : '');
+const fresh = (entry: Entry<unknown> | undefined): boolean => entry !== undefined && entry.expiresAt > Date.now();
 
-/**
- * Bounded per namespace, not globally.
- *
- * One shared cap would let a single HN listing visit evict everything else: the link map
- * writes one key per distinct URL on the page, so ~30 per visit, and two visits plus a
- * re-scrape from the mutation observer would push out cached shards and per-tab findings
- * by insertion order. An evicted finding means the panel re-runs a lookup, which is an
- * avoidable shard fetch — the exact thing §6 wants to keep rare.
- *
- * Sized against `chrome.storage.session`'s 10 MB: shards dominate at ~11 KB each, so the
- * index namespace is the only one that costs anything (~1 MB at cap). Link map entries
- * are a few hundred bytes and findings are smaller.
- */
-const CAPS: readonly (readonly [string, number])[] = [
-  ['linkmap:', 400],
-  ['finding:', 64],
-];
-const DEFAULT_CAP = 96;
+export class SessionCache {
+  private readonly memory = new Map<string, Entry<unknown>>();
+  private loaded = false;
+  private queue: Promise<unknown> = Promise.resolve();
+  constructor(private readonly storage: () => Storage = () => chrome.storage.session) {}
 
-/** Keys are `linkmap:<url>`, `finding:<tabId>`, or a bare artifact path. */
-const namespaceOf = (key: string): string => {
-  const colon = key.indexOf(':');
-  return colon === -1 ? '' : key.slice(0, colon + 1);
-};
+  // Serialize hydration and mutations. Concurrent listing writes must share one cap.
+  private run<T>(work: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(work);
+    this.queue = result.catch(() => undefined);
+    return result;
+  }
 
-const capFor = (namespace: string): number =>
-  CAPS.find(([prefix]) => prefix === namespace)?.[1] ?? DEFAULT_CAP;
-
-const memory = new Map<string, Entry<unknown>>();
-
-const isFresh = (entry: Entry<unknown> | undefined): boolean =>
-  entry !== undefined && entry.expiresAt > Date.now();
-
-export const cacheGet = async <T>(key: string): Promise<T | null> => {
-  const local = memory.get(key);
-  if (isFresh(local)) return (local as Entry<T>).value;
-  memory.delete(key);
-
-  try {
-    const stored = await chrome.storage.session.get(key);
-    const entry = stored[key] as Entry<T> | undefined;
-    if (!isFresh(entry)) {
-      if (entry !== undefined) await chrome.storage.session.remove(key);
-      return null;
+  private async load(): Promise<void> {
+    if (this.loaded) return;
+    try {
+      const stored = await this.storage().get(null);
+      for (const [key, entry] of Object.entries(stored)) {
+        if (entry && typeof entry === 'object' && 'expiresAt' in entry) {
+          if (!this.memory.has(key)) this.memory.set(key, entry as Entry<unknown>);
+        }
+      }
+      this.loaded = true;
+    } catch {
+      /* Unavailable storage is a cache miss; retry hydration next time. */
     }
-    memory.set(key, entry as Entry<unknown>);
-    return (entry as Entry<T>).value;
-  } catch {
-    // Session storage is a cache, never the authority — a failure here is a miss.
-    return null;
-  }
-};
-
-export const cacheSet = async <T>(key: string, value: T, ttlMs: number): Promise<void> => {
-  const entry: Entry<T> = { value, expiresAt: Date.now() + ttlMs };
-  memory.set(key, entry as Entry<unknown>);
-
-  // Drop expired entries first; only evict live ones if still over the cap.
-  for (const [candidate, existing] of memory) {
-    if (!isFresh(existing)) memory.delete(candidate);
   }
 
-  const namespace = namespaceOf(key);
-  const cap = capFor(namespace);
-  // Map iteration is insertion order, so filtering by namespace gives oldest-first.
-  const siblings = [...memory.keys()].filter((candidate) => namespaceOf(candidate) === namespace);
-  for (const evicted of siblings.slice(0, Math.max(0, siblings.length - cap))) {
-    memory.delete(evicted);
-    void chrome.storage.session.remove(evicted);
+  private async prune(): Promise<void> {
+    const remove: string[] = [];
+    const namespaces = new Map<string, string[]>();
+    for (const [key, entry] of this.memory) {
+      if (!fresh(entry)) {
+        remove.push(key);
+        continue;
+      }
+      const namespace = namespaceOf(key);
+      const keys = namespaces.get(namespace) ?? [];
+      keys.push(key);
+      namespaces.set(namespace, keys);
+    }
+    for (const [namespace, keys] of namespaces) {
+      remove.push(...keys.slice(0, Math.max(0, keys.length - (CAPS[namespace] ?? 96))));
+    }
+    for (const key of remove) this.memory.delete(key);
+    if (remove.length)
+      await this.storage()
+        .remove(remove)
+        .catch(() => undefined);
   }
 
-  try {
-    await chrome.storage.session.set({ [key]: entry });
-  } catch {
-    // Over quota or unavailable: the in-memory copy still serves this worker's life.
+  get<T>(key: string): Promise<T | null> {
+    return this.run(async () => {
+      await this.load();
+      await this.prune();
+      return (this.memory.get(key)?.value as T | undefined) ?? null;
+    });
   }
-};
+
+  set<T>(key: string, value: T, ttlMs: number): Promise<void> {
+    return this.run(async () => {
+      await this.load();
+      const entry = { value, expiresAt: Date.now() + ttlMs };
+      // Refreshing a key also moves it to the back of the eviction queue.
+      this.memory.delete(key);
+      this.memory.set(key, entry);
+      await this.prune();
+      await this.storage()
+        .set({ [key]: entry })
+        .catch(() => undefined);
+    });
+  }
+
+  delete(key: string): Promise<void> {
+    return this.run(async () => {
+      await this.load();
+      this.memory.delete(key);
+      await this.storage()
+        .remove(key)
+        .catch(() => undefined);
+    });
+  }
+}
+const cache = new SessionCache();
+export const cacheGet = <T>(key: string): Promise<T | null> => cache.get<T>(key);
+export const cacheSet = <T>(key: string, value: T, ttlMs: number): Promise<void> => cache.set(key, value, ttlMs);
+export const cacheDelete = (key: string): Promise<void> => cache.delete(key);

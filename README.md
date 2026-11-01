@@ -47,8 +47,9 @@ The extension's only network origins:
 
 - Published on the [Chrome Web Store](https://chromewebstore.google.com/detail/hn-sidecar/afgdpkifkpankhalmemgdpliheijpkap) (version 0.1.0).
 - Chrome MV3 extension; developers can also load `packages/extension/dist/` unpacked.
-- Source includes a 0.1.1 candidate with panel accessibility and narrow-layout fixes;
-  these UI changes are not in the published 0.1.0 package yet.
+- Source includes an unreleased 0.1.1 candidate with accessible narrow-panel layouts,
+  explicit lookup/thread retry, refresh controls, cache timestamps, and navigation
+  race and cache-lifecycle fixes. These changes are not in published 0.1.0 yet.
 - The default hosted index (Worker + D1 + R2) is at `hn-index.tanner.place`.
 - Cloudflare caches shards for six hours and `manifest.json` and `recent.json`
   for five minutes; repeated GET requests return `cf-cache-status: HIT`.

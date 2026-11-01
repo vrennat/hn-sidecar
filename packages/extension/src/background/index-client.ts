@@ -34,10 +34,11 @@ const REQUEST_TIMEOUT_MS = 8_000;
  */
 export class IndexVersionError extends Error {}
 
-const fetchJson = async <T>(key: string): Promise<T> => {
+const fetchJson = async <T>(key: string, refresh: boolean): Promise<T> => {
   const response = await fetch(`${INDEX_ORIGIN}/${key}`, {
     // No cookies to send and none wanted: the index is public and anonymous.
     credentials: 'omit',
+    cache: refresh ? 'reload' : 'default',
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`GET /${key} -> ${response.status}`);
@@ -52,26 +53,33 @@ const fetchJson = async <T>(key: string): Promise<T> => {
  * second. The map lives in worker memory only — MV3 termination clears it — which is
  * exactly the window in which the concurrency exists.
  */
-const inflight = new Map<string, Promise<unknown>>();
+const inflight = new Map<string, { run: Promise<unknown>; refresh: boolean }>();
 
-const cachedJson = async <T>(key: string, ttlMs: number): Promise<T> => {
-  const hit = await cacheGet<T>(key);
-  if (hit !== null) return hit;
+const cachedJson = async <T>(key: string, ttlMs: number, refresh = false): Promise<T> => {
+  if (!refresh) {
+    const hit = await cacheGet<T>(key);
+    if (hit !== null) return hit;
+  }
   const pending = inflight.get(key);
-  if (pending !== undefined) return (await pending) as T;
-  const run = fetchJson<T>(key)
+  if (pending && (!refresh || pending.refresh)) return (await pending.run) as T;
+  const entry = { refresh, run: Promise.resolve(undefined) as Promise<unknown> };
+  entry.run = fetchJson<T>(key, refresh)
     .then(async (value) => {
-      await cacheSet(key, value, ttlMs);
+      // A refresh supersedes an ordinary fetch; its older result cannot repopulate cache.
+      if (inflight.get(key) === entry) await cacheSet(key, value, ttlMs);
       return value;
     })
-    .finally(() => inflight.delete(key));
-  inflight.set(key, run);
-  return await run;
+    .finally(() => {
+      if (inflight.get(key) === entry) inflight.delete(key);
+    });
+  inflight.set(key, entry);
+  return (await entry.run) as T;
 };
 
-export const getManifest = async (): Promise<Manifest> => cachedJson<Manifest>(MANIFEST_KEY, MANIFEST_TTL_MS);
-
-export const getRecent = async (): Promise<RecentIndex> => cachedJson<RecentIndex>(RECENT_KEY, RECENT_TTL_MS);
+export const getManifest = (refresh = false): Promise<Manifest> =>
+  cachedJson<Manifest>(MANIFEST_KEY, MANIFEST_TTL_MS, refresh);
+export const getRecent = (refresh = false): Promise<RecentIndex> =>
+  cachedJson<RecentIndex>(RECENT_KEY, RECENT_TTL_MS, refresh);
 
 /**
  * Fetches one shard and validates what the shard says about itself.
@@ -81,8 +89,8 @@ export const getRecent = async (): Promise<RecentIndex> => cachedJson<RecentInde
  * manifest alongside a stale shard. Trusting the manifest's `nv` for a shard's
  * contents would make that case silently wrong instead of detectable.
  */
-export const getShard = async (shard: string): Promise<Shard> => {
-  const value = await cachedJson<Shard>(SHARD_KEY(shard), SHARD_TTL_MS);
+export const getShard = async (shard: string, refresh = false): Promise<Shard> => {
+  const value = await cachedJson<Shard>(SHARD_KEY(shard), SHARD_TTL_MS, refresh);
   // A misroute is a transport problem, not a version problem: the file we got is not
   // the file we asked for, and retrying may well fix it.
   if (value.b !== shard) throw new Error(`shard ${shard} self-reports as ${value.b}`);
