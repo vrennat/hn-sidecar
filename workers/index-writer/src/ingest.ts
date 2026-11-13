@@ -10,6 +10,7 @@
 
 import { BUCKET_COUNT, hashNormalized, urlVariants, type ShardEntry } from '@hn-sidecar/shared';
 import type { Env } from './env.ts';
+import { readHashCount, recountHashes, withHashCount } from './hash-count.ts';
 import { putManifest, putRecent, putShard } from './publish.ts';
 
 const FIREBASE = 'https://hacker-news.firebaseio.com/v0';
@@ -204,14 +205,14 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
   // Grouped per story, never flattened blindly: a story's DELETE and its
   // reinserts must land in the same batch, or a chunk boundary between them
   // leaves the story with no hash rows at all until the next full regen.
-  const groups: D1PreparedStatement[][] = [];
+  const groups: { storyId?: number; statements: D1PreparedStatement[] }[] = [];
 
   for (const story of stories) {
     const id = story.id;
     const url = story.url;
     if (id === undefined || url === undefined) continue;
     const batch: D1PreparedStatement[] = [];
-    groups.push(batch);
+    groups.push({ storyId: id, statements: batch });
 
     batch.push(
       env.DB.prepare(
@@ -237,7 +238,7 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
   // the stalest-first cursor keeps advancing instead of spinning on them each tick.
   if (bumpRefreshed.length > 0) {
     const bumpGroup: D1PreparedStatement[] = [];
-    groups.push(bumpGroup);
+    groups.push({ statements: bumpGroup });
     for (const bumpId of bumpRefreshed) {
       bumpGroup.push(env.DB.prepare('UPDATE stories SET refreshed_at = ?1 WHERE id = ?2').bind(now, bumpId));
     }
@@ -262,16 +263,29 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
     }
   }
 
-  // Pack whole groups into batches without ever splitting one.
-  let chunk: D1PreparedStatement[] = [];
+  // The batches below adjust the manifest's entry counter rather than recounting
+  // the table; seed it once if it has never been written.
+  let entryCount = await readHashCount(env);
+  if (entryCount === null) entryCount = await recountHashes(env);
+
+  // Pack whole groups into batches without ever splitting one. Two slots per batch
+  // are reserved for the entry-counter adjustments that bracket it.
+  const runChunk = async (chunk: readonly { storyId?: number; statements: D1PreparedStatement[] }[]) => {
+    const storyIds = chunk.flatMap((group) => (group.storyId === undefined ? [] : [group.storyId]));
+    await env.DB.batch(withHashCount(env, storyIds, chunk.flatMap((group) => group.statements)));
+  };
+  let chunk: typeof groups = [];
+  let chunkSize = 0;
   for (const group of groups) {
-    if (chunk.length > 0 && chunk.length + group.length > BATCH_CHUNK) {
-      await env.DB.batch(chunk);
+    if (chunkSize > 0 && chunkSize + group.statements.length > BATCH_CHUNK - 2) {
+      await runChunk(chunk);
       chunk = [];
+      chunkSize = 0;
     }
-    chunk.push(...group);
+    chunk.push(group);
+    chunkSize += group.statements.length;
   }
-  if (chunk.length > 0) await env.DB.batch(chunk);
+  if (chunkSize > 0) await runChunk(chunk);
 
   // Rewrite every touched shard from D1, which is now authoritative.
   const buckets = [...touched];
@@ -304,8 +318,7 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
 
   // Manifest last, always — see publish.ts. Keeps generated_at honest so a client
   // can tell how fresh the index is.
-  const total = await env.DB.prepare('SELECT count(*) AS n FROM story_hashes').first<{ n: number }>();
-  await putManifest(env, total?.n ?? 0, BUCKET_COUNT);
+  await putManifest(env, (await readHashCount(env)) ?? entryCount, BUCKET_COUNT);
 
   // Advance the watermark only over ids actually examined.
   if (newIds.length > 0 || previous === null) await writeWatermark(env, to > 0 ? to : maxItem);

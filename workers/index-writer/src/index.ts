@@ -9,6 +9,7 @@
 
 import { BUCKET_COUNT } from '@hn-sidecar/shared';
 import { secretEquals, type Env } from './env.ts';
+import { recountHashes } from './hash-count.ts';
 import { ingest } from './ingest.ts';
 import { putManifest } from './publish.ts';
 import { regenRange } from './regen.ts';
@@ -66,9 +67,11 @@ export default {
      * shard it describes, so it cannot be written by a partial range.
      */
     if (request.method === 'POST' && url.pathname === '/regen/finalize') {
-      const total = await env.DB.prepare('SELECT count(*) AS n FROM story_hashes').first<{ n: number }>();
-      await putManifest(env, total?.n ?? 0, BUCKET_COUNT);
-      return json({ finalized: true, entry_count: total?.n ?? 0, shard_count: BUCKET_COUNT });
+      // The one exact recount: it also resets the counter ingest maintains, so drift
+      // from writes outside ingest (a seed import) ends at the next finalize.
+      const total = await recountHashes(env);
+      await putManifest(env, total, BUCKET_COUNT);
+      return json({ finalized: true, entry_count: total, shard_count: BUCKET_COUNT });
     }
 
     if (request.method === 'POST' && url.pathname === '/ingest') {
