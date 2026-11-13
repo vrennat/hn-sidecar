@@ -60,7 +60,7 @@ test('latest and front-page stories publish during catch-up without skipping the
   try {
     const result = await ingest(f.env);
     expect(result.watermark).toBe(3500);
-    expect(f.db.query('SELECT value FROM meta').get()).toEqual({ value: '3500' });
+    expect(f.db.query("SELECT value FROM meta WHERE key = 'last_max_item'").get()).toEqual({ value: '3500' });
     expect(result.stories_upserted).toBe(101);
     expect(fetched.filter((id) => id === 20001)).toHaveLength(1);
     expect(fetched).not.toContain(20101); // cap each feed at 100
@@ -86,7 +86,7 @@ test('upstream item failure never advances the cursor or publishes a partial rec
   }) as typeof fetch;
   try {
     await expect(ingest(f.env)).rejects.toThrow('503');
-    expect(f.db.query('SELECT value FROM meta').get()).toEqual({ value: '1000' });
+    expect(f.db.query("SELECT value FROM meta WHERE key = 'last_max_item'").get()).toEqual({ value: '1000' });
     expect(f.artifacts.size).toBe(0);
     expect(f.batches).toHaveLength(0);
   } finally { globalThis.fetch = originalFetch; f.db.close(); }
