@@ -54,4 +54,5 @@ CREATE TABLE IF NOT EXISTS meta (
 --   wrangler d1 execute hn-sidecar --remote --command "CREATE INDEX IF NOT EXISTS stories_refreshed_at ON stories (refreshed_at, ts);"
 
 -- === Migration for databases created before story_hashes_bucket_h existed ===
---   wrangler d1 execute hn-sidecar --remote --file=db/migrations/2026-11-12-story-hashes-bucket-covering.sql
+-- See db/migrations/2026-11-12-story-hashes-bucket-covering.sql; apply with:
+--   wrangler d1 execute hn-sidecar --remote --command "CREATE INDEX IF NOT EXISTS story_hashes_bucket_h ON story_hashes (bucket, story_id, h); DROP INDEX IF EXISTS story_hashes_bucket;"

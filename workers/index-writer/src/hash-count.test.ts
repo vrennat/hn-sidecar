@@ -74,11 +74,16 @@ test('steady-state ingest keeps entry_count exact without scanning story_hashes'
     expect(f.counter()).toBe(String(f.actual()));
     expect(f.artifacts.get('manifest.json').entry_count).toBe(f.actual());
 
-    // A retargeted URL deletes and reinserts that story's rows; a www variant URL changes the row count.
+    // Retargeted URLs delete and reinsert rows. Story 5 drops from two rows to one and
+    // story 1001 moves to an unnormalizable URL (one row to none), so the net change is negative.
+    f.db.run("INSERT INTO story_hashes VALUES (5, 'second', 9)");
+    f.db.run("UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'story_hashes_count'");
+    const before = f.actual();
     f.queries.length = 0;
-    globalThis.fetch = firebase(1040, new Map([[1001, 'https://www.example.com/a?x=1'], [5, 'https://example.net/5']]), [1001, 5]);
+    globalThis.fetch = firebase(1040, new Map([[1001, 'ftp://example.org/a'], [5, 'https://example.net/5']]), [1001, 5]);
     await ingest(f.env);
     expect(f.queries.filter(isFullCount)).toEqual([]);
+    expect(f.actual()).toBe(before - 2);
     expect(f.counter()).toBe(String(f.actual()));
     expect(f.artifacts.get('manifest.json').entry_count).toBe(f.actual());
   } finally { globalThis.fetch = originalFetch; f.db.close(); }

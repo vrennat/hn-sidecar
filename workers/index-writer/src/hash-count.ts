@@ -5,8 +5,9 @@
  * ingest ran it every tick only to fill a sanity-check field. Ingest now adjusts
  * the counter inside each write batch, so the count stays exact without a scan.
  *
- * Bulk writes that bypass ingest (the seed import) leave the counter stale until
- * `/regen/finalize`, which recounts once and resets it. A missing counter is
+ * Any write to story_hashes that bypasses ingest (the seed import, a manual
+ * DELETE) leaves the counter stale until `POST /regen/finalize`, which recounts
+ * once and resets it; run finalize after such a write. A missing counter is
  * seeded from a single recount on the next ingest.
  */
 

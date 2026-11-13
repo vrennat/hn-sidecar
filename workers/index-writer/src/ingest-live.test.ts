@@ -86,7 +86,7 @@ test('upstream item failure never advances the cursor or publishes a partial rec
   }) as typeof fetch;
   try {
     await expect(ingest(f.env)).rejects.toThrow('503');
-    expect(f.db.query('SELECT value FROM meta').get()).toEqual({ value: '1000' });
+    expect(f.db.query("SELECT value FROM meta WHERE key = 'last_max_item'").get()).toEqual({ value: '1000' });
     expect(f.artifacts.size).toBe(0);
     expect(f.batches).toHaveLength(0);
   } finally { globalThis.fetch = originalFetch; f.db.close(); }
