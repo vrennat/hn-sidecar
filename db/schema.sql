@@ -37,10 +37,12 @@ CREATE TABLE IF NOT EXISTS story_hashes (
   PRIMARY KEY (story_id, h)
 );
 
--- The regen batch's only access pattern: every hash in a bucket range, ordered.
-CREATE INDEX IF NOT EXISTS story_hashes_bucket ON story_hashes (bucket, story_id);
+-- The regen batch and the ingest shard rewrite: every hash in a bucket (range),
+-- ordered. Covers h so neither query touches the table row or sorts.
+CREATE INDEX IF NOT EXISTS story_hashes_bucket_h ON story_hashes (bucket, story_id, h);
 
--- Small key/value state for the write path: the ingest watermark, mostly.
+-- Small key/value state for the write path: the ingest watermark and the
+-- story_hashes row counter behind the manifest's entry_count (see hash-count.ts).
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -50,3 +52,6 @@ CREATE TABLE IF NOT EXISTS meta (
 -- Run once against the live database before deploying the new ingest:
 --   wrangler d1 execute hn-sidecar --remote --command "ALTER TABLE stories ADD COLUMN refreshed_at INTEGER NOT NULL DEFAULT 0;"
 --   wrangler d1 execute hn-sidecar --remote --command "CREATE INDEX IF NOT EXISTS stories_refreshed_at ON stories (refreshed_at, ts);"
+
+-- === Migration for databases created before story_hashes_bucket_h existed ===
+--   wrangler d1 execute hn-sidecar --remote --file=db/migrations/2026-11-12-story-hashes-bucket-covering.sql
