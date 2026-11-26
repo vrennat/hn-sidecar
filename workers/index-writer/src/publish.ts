@@ -26,10 +26,23 @@ const putJson = async (env: Env, key: string, body: unknown, cacheControl: strin
   });
 };
 
-export const putShard = async (env: Env, bucket: number, entries: readonly ShardEntry[]): Promise<void> => {
+export const putShard = async (env: Env, bucket: number, entries: readonly ShardEntry[], skipUnchanged = false): Promise<boolean> => {
   const b = shardName(bucket);
   const shard: Shard = { av: ARTIFACT_VERSION, nv: NORM_VERSION, b, e: entries };
-  await putJson(env, SHARD_KEY(b), shard, SHARD_CACHE_CONTROL);
+  const key = SHARD_KEY(b);
+  const body = JSON.stringify(shard);
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body));
+  if (skipUnchanged) {
+    const existing = await env.INDEX.head(key);
+    const checksum = existing?.checksums.sha256;
+    const bytes = new Uint8Array(digest);
+    if (checksum && new Uint8Array(checksum).every((byte, i) => byte === bytes[i])) return false;
+  }
+  await env.INDEX.put(key, body, {
+    sha256: digest,
+    httpMetadata: { contentType: 'application/json', cacheControl: SHARD_CACHE_CONTROL },
+  });
+  return true;
 };
 
 export const putRecent = async (env: Env, entries: readonly ShardEntry[]): Promise<void> => {

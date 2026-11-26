@@ -31,7 +31,7 @@ test('catch-up ingestion chunks old-bucket lookups within D1 limits and publishe
     },
     async batch() { events.push('batch'); }
   };
-  const INDEX = { async put(key: string) { written.push(key); events.push(key); } };
+  const INDEX = { async head() { return null; }, async put(key: string) { written.push(key); events.push(key); } };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: string | URL | Request) => {
     const url = String(input);

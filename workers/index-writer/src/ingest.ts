@@ -42,6 +42,9 @@ const RECENT_WINDOW_SECONDS = 48 * 3600;
 const RECENT_MAX_ENTRIES = 5_000;
 
 const FETCH_CONCURRENCY = 25;
+const RETRY_BATCH = 100;
+const RETRY_DELAY_SECONDS = 600;
+const DUE_ITEMS_SQL = 'SELECT id FROM item_retries WHERE retry_after <= ?1 ORDER BY retry_after, id LIMIT ?2';
 const PUT_CONCURRENCY = 40;
 
 /**
@@ -71,6 +74,8 @@ interface FirebaseItem {
 
 export interface IngestResult {
   readonly examined: number;
+  readonly items_deferred: number;
+  readonly shards_written: number;
   readonly stories_upserted: number;
   readonly buckets_touched: number;
   readonly recent_entries: number;
@@ -79,10 +84,9 @@ export interface IngestResult {
   readonly watermark: number;
 }
 
-const getJson = async <T>(url: string): Promise<T | null> => {
-  const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-  // A failed item fetch must fail the tick before its watermark advances. Treating
-  // a 503 as a missing item permanently skips that ID on the next run.
+const getJson = async <T>(url: string, timeoutMs = 15_000): Promise<T | null> => {
+  const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+  // A transport failure must remain distinguishable from a confirmed JSON null.
   if (!response.ok) throw new Error(`GET ${url} -> ${response.status}`);
   return (await response.json()) as T | null;
 };
@@ -139,11 +143,20 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
 
   const newIds = from <= to ? Array.from({ length: to - from + 1 }, (_, offset) => from + offset) : [];
   const changedIds = (updates?.items ?? []).slice(0, MAX_CHANGED);
-  const candidates = [...new Set([...newIds, ...changedIds, ...liveFeeds.flat()])];
+  const now = Math.floor(Date.now() / 1000);
+  const due = await env.DB.prepare(DUE_ITEMS_SQL).bind(now, RETRY_BATCH).all<{ id: number }>();
+  const candidates = [...new Set([...newIds, ...changedIds, ...liveFeeds.flat(), ...due.results.map(row => row.id)])];
+  const failed = new Set<number>();
+  const fetchItem = async (id: number): Promise<FirebaseItem | null> => {
+    try {
+      return await getJson<FirebaseItem>(`${FIREBASE}/item/${id}.json`, 5_000);
+    } catch {
+      failed.add(id);
+      return null;
+    }
+  };
 
-  const items = await mapLimit(candidates, FETCH_CONCURRENCY, (id) =>
-    getJson<FirebaseItem>(`${FIREBASE}/item/${id}.json`),
-  );
+  const items = await mapLimit(candidates, FETCH_CONCURRENCY, fetchItem);
 
   /**
    * Rolling re-fetch of the stalest stories' score/descendants/title/url.
@@ -160,7 +173,6 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
    * unchanged and confirmed-gone rows just get their `refreshed_at` bumped, which
    * keeps the pass cheap once the index has settled.
    */
-  const now = Math.floor(Date.now() / 1000);
   const stalest = await env.DB.prepare(
     'SELECT id, url, title, score, descendants FROM stories ORDER BY refreshed_at ASC, ts ASC LIMIT ?1',
   )
@@ -170,8 +182,22 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
   const staleItems = await mapLimit(stalest.results, FETCH_CONCURRENCY, (row) =>
     fetched.has(row.id)
       ? Promise.resolve(fetched.get(row.id) ?? null)
-      : getJson<FirebaseItem>(`${FIREBASE}/item/${row.id}.json`),
+      : fetchItem(row.id),
   );
+
+  if (failed.size > 0 && failed.size === new Set([...candidates, ...stalest.results.map(row => row.id)]).size) {
+    throw new Error('All Firebase item requests failed');
+  }
+
+  // Record holes before publishing or advancing the cursor. Keep recovered IDs
+  // queued until the publish finishes so a failed R2 write can be retried.
+  const deferred = [...failed];
+  for (let offset = 0; offset < deferred.length; offset += BATCH_CHUNK) {
+    await env.DB.batch(deferred.slice(offset, offset + BATCH_CHUNK).map(id =>
+      env.DB.prepare('INSERT OR REPLACE INTO item_retries (id, retry_after) VALUES (?1, ?2)')
+        .bind(id, now + RETRY_DELAY_SECONDS)
+    ));
+  }
 
   const refreshedStories: FirebaseItem[] = [];
   const bumpRefreshed: number[] = [];
@@ -180,7 +206,7 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
     if (fetched.has(stored.id) && isStoryWithUrl(fetched.get(stored.id) ?? null)) return;
     const item = staleItems[index];
     // A null Firebase item is not confirmed gone: leave it stalest for a retry.
-    // Transport/parse failures reject earlier, before any writes or cursor advance.
+    // A transport failure also enters the durable retry queue.
     if (item === null || item === undefined) return;
     // Dead/deleted/no-url: confirmed gone, rotate out of the queue permanently.
     if (!isStoryWithUrl(item)) {
@@ -236,12 +262,8 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
 
   // Unchanged or gone re-fetch rows still rotate to the back of the stalest queue, so
   // the stalest-first cursor keeps advancing instead of spinning on them each tick.
-  if (bumpRefreshed.length > 0) {
-    const bumpGroup: D1PreparedStatement[] = [];
-    groups.push({ statements: bumpGroup });
-    for (const bumpId of bumpRefreshed) {
-      bumpGroup.push(env.DB.prepare('UPDATE stories SET refreshed_at = ?1 WHERE id = ?2').bind(now, bumpId));
-    }
+  for (const id of bumpRefreshed) {
+    groups.push({ statements: [env.DB.prepare('UPDATE stories SET refreshed_at = ?1 WHERE id = ?2').bind(now, id)] });
   }
 
   // Buckets the story previously occupied must be rewritten too, or a removed
@@ -288,6 +310,7 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
   if (chunkSize > 0) await runChunk(chunk);
 
   // Rewrite every touched shard from D1, which is now authoritative.
+  let shardsWritten = 0;
   const buckets = [...touched];
   for (let offset = 0; offset < buckets.length; offset += PUT_CONCURRENCY) {
     const slice = buckets.slice(offset, offset + PUT_CONCURRENCY);
@@ -300,7 +323,7 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
         )
           .bind(bucket)
           .all<ShardEntry>();
-        await putShard(env, bucket, rows.results);
+        if (await putShard(env, bucket, rows.results, true)) shardsWritten++;
       }),
     );
   }
@@ -320,11 +343,20 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
   // can tell how fresh the index is.
   await putManifest(env, (await readHashCount(env)) ?? entryCount, BUCKET_COUNT);
 
-  // Advance the watermark only over ids actually examined.
+  const recovered = due.results.filter(row => !failed.has(row.id));
+  if (recovered.length) {
+    await env.DB.batch(recovered.map(row =>
+      env.DB.prepare('DELETE FROM item_retries WHERE id = ?1 AND retry_after <= ?2').bind(row.id, now)
+    ));
+  }
+
+  // Every skipped id is durably queued before this watermark moves.
   if (newIds.length > 0 || previous === null) await writeWatermark(env, to > 0 ? to : maxItem);
 
   return {
     examined: candidates.length,
+    items_deferred: failed.size,
+    shards_written: shardsWritten,
     stories_upserted: stories.length,
     buckets_touched: touched.size,
     recent_entries: recent.results.length,

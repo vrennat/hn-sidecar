@@ -31,7 +31,7 @@ const fixture = () => {
       batches.push(statements.length);
       for (const statement of statements) await statement.run();
     } },
-    INDEX: { async put(key: string, body: string) { artifacts.set(key, JSON.parse(body)); } },
+    INDEX: { async head() { return null; }, async put(key: string, body: string) { artifacts.set(key, JSON.parse(body)); } },
   } as unknown as Env;
   return { db, artifacts, batches, env };
 };
@@ -85,9 +85,39 @@ test('upstream item failure never advances the cursor or publishes a partial rec
     return new Response('unavailable', { status: 503 });
   }) as typeof fetch;
   try {
-    await expect(ingest(f.env)).rejects.toThrow('503');
+    await expect(ingest(f.env)).rejects.toThrow('All Firebase item requests failed');
     expect(f.db.query("SELECT value FROM meta WHERE key = 'last_max_item'").get()).toEqual({ value: '1000' });
     expect(f.artifacts.size).toBe(0);
     expect(f.batches).toHaveLength(0);
+  } finally { globalThis.fetch = originalFetch; f.db.close(); }
+});
+
+test('a timed-out item survives cursor advancement and is published on a later tick', async () => {
+  const f = fixture();
+  const originalFetch = globalThis.fetch;
+  let timeout = true;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.endsWith('/maxitem.json')) return Response.json(1002);
+    if (url.endsWith('/updates.json')) return Response.json({ items: [] });
+    if (url.endsWith('stories.json')) return Response.json([]);
+    const id = Number(url.match(/item\/(\d+)/)?.[1]);
+    if (id === 1001 && timeout) {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      throw new DOMException('deadline', 'TimeoutError');
+    }
+    return Response.json(story(id));
+  }) as typeof fetch;
+  try {
+    const first = await ingest(f.env);
+    expect(first.watermark).toBe(1002);
+    expect(first.items_deferred).toBe(1);
+    expect(f.db.query('SELECT id FROM item_retries').all()).toEqual([{ id: 1001 }]);
+    expect(f.db.query('SELECT id FROM stories').all()).toEqual([{ id: 1002 }]);
+    f.db.exec('UPDATE item_retries SET retry_after=0');
+    timeout = false;
+    await ingest(f.env);
+    expect(f.artifacts.get('recent.json').entries.map((e: {id: number}) => e.id)).toContain(1001);
+    expect(f.db.query('SELECT id FROM item_retries').all()).toEqual([]);
   } finally { globalThis.fetch = originalFetch; f.db.close(); }
 });

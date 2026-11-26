@@ -48,6 +48,13 @@ CREATE TABLE IF NOT EXISTS meta (
   value TEXT NOT NULL
 );
 
+-- A failed Firebase item remains discoverable even after it leaves the live feeds.
+CREATE TABLE IF NOT EXISTS item_retries (
+  id INTEGER PRIMARY KEY,
+  retry_after INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS item_retries_due ON item_retries (retry_after);
+
 -- === Migration for databases created before `refreshed_at` existed ===
 -- Run once against the live database before deploying the new ingest:
 --   wrangler d1 execute hn-sidecar --remote --command "ALTER TABLE stories ADD COLUMN refreshed_at INTEGER NOT NULL DEFAULT 0;"

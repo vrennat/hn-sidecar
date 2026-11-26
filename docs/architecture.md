@@ -135,14 +135,13 @@ The Worker runs every 10 minutes. It:
    stories' engagement. IDs are deduplicated across all sources and rolling refresh.
 3. Upserts URL-bearing stories into D1.
 4. Replaces each changed story's digest rows.
-5. Rewrites both newly touched and previously occupied shards.
+5. Checks newly touched and previously occupied shards. Ingest writes a shard when its SHA-256 differs or the existing object lacks a checksum.
 6. Publishes the 48-hour recent index.
 7. Writes the manifest last.
 8. Advances the watermark.
 
 Only the contiguous historical range advances the watermark; live-feed IDs never
-skip the backlog. Upstream HTTP/parse failures abort before database or artifact
-writes, leaving the cursor in place for the next tick. The feed caps bound work;
+skip the backlog. An isolated item timeout or HTTP/parse error queues its ID in D1 before the cursor advances. Each tick includes up to 100 due retries, removing recovered IDs after publication. A failed feed or complete item outage still fails the tick. Apply the item-retries migration before rolling out this Worker. The feed caps bound work;
 they do not guarantee exhaustive coverage through a prolonged ingestion outage.
 
 Replacing old digest rows and rewriting previous buckets is necessary because moderators can retarget a story URL. Otherwise the old URL would continue matching indefinitely.
