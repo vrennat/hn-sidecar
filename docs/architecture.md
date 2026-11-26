@@ -135,17 +135,29 @@ The Worker runs every 10 minutes. It:
    stories' engagement. IDs are deduplicated across all sources and rolling refresh.
 3. Upserts URL-bearing stories into D1.
 4. Replaces each changed story's digest rows.
-5. Rewrites both newly touched and previously occupied shards.
+5. Checks newly touched and previously occupied shards. Ingest writes a shard when its SHA-256 differs or the existing object lacks a checksum.
 6. Publishes the 48-hour recent index.
 7. Writes the manifest last.
 8. Advances the watermark.
 
 Only the contiguous historical range advances the watermark; live-feed IDs never
-skip the backlog. Upstream HTTP/parse failures abort before database or artifact
-writes, leaving the cursor in place for the next tick. The feed caps bound work;
-they do not guarantee exhaustive coverage through a prolonged ingestion outage.
+skip the backlog. Item fetches share a 45-second deadline. A wave of at least
+20 requests with at least 25% failures stops new requests. When a failing wave
+includes a historical miss, or historical misses exceed 50, the cursor stays
+put. On a deadline, it advances only through the contiguous examined range.
 
-Replacing old digest rows and rewriting previous buckets is necessary because moderators can retarget a story URL. Otherwise the old URL would continue matching indefinitely.
+D1 records isolated misses before the cursor advances. Each tick selects up
+to 100 due retries, prioritizing fewer attempts and then newer misses. The
+first failure waits ten minutes, the delay doubles on each subsequent due
+failure, and the eighth failure logs and evicts the ID. Successful fetches,
+including confirmed null or non-story items, clear outstanding retries.
+
+Each story transaction marks its former and current hash buckets in
+`dirty_shards`. Ingest rebuilds pending shards from D1 and clears markers after
+R2 confirms the shard contents. An interrupted publish leaves work for the next
+tick even when the story is unchanged. A D1 lease serializes scheduled and
+manual ingest publishers and expires after 20 minutes if a Worker disappears.
+Apply the item-retries migration before rolling out this Worker.
 
 ### Rolling metadata refresh
 
@@ -155,7 +167,7 @@ Each ingest tick therefore re-fetches 200 stories ordered by `refreshed_at`, the
 
 - changed score, descendants, title, or URL: run through the normal upsert and shard rewrite path;
 - confirmed dead or unchanged: advance `refreshed_at` with a cheap D1 update;
-- transient fetch failure: leave the row stale so the next tick retries it.
+- transient refresh failure or null item: advance `refreshed_at` so the rotation continues. Stale-only misses use the next rotation for their retry.
 
 At 200 stories per ten-minute tick, roughly 600,000 rows rotate in about three weeks. When the user opens a thread, the panel immediately corrects displayed points and comments from the freshly fetched HN item page.
 

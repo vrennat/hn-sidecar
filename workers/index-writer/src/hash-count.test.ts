@@ -33,7 +33,7 @@ const fixture = () => {
     DB: { prepare, async batch(statements: ReturnType<typeof prepare>[]) {
       db.transaction(() => { for (const statement of statements) statement.runSync(); })();
     } },
-    INDEX: { async put(key: string, body: string) { artifacts.set(key, JSON.parse(body)); } },
+    INDEX: { async head() { return null; }, async put(key: string, body: string) { artifacts.set(key, JSON.parse(body)); } },
     ADMIN_TOKEN: 'test-token',
   } as unknown as Env;
   const actual = () => (db.query('SELECT count(*) AS n FROM story_hashes').get() as { n: number }).n;

@@ -11,6 +11,7 @@
 import { BUCKET_COUNT, hashNormalized, urlVariants, type ShardEntry } from '@hn-sidecar/shared';
 import type { Env } from './env.ts';
 import { readHashCount, recountHashes, withHashCount } from './hash-count.ts';
+import { deferItems, DUE_ITEMS_SQL, RETRY_BATCH } from './item-retries.ts';
 import { putManifest, putRecent, putShard } from './publish.ts';
 
 const FIREBASE = 'https://hacker-news.firebaseio.com/v0';
@@ -42,6 +43,8 @@ const RECENT_WINDOW_SECONDS = 48 * 3600;
 const RECENT_MAX_ENTRIES = 5_000;
 
 const FETCH_CONCURRENCY = 25;
+const FETCH_BUDGET_MS = 45_000;
+const ITEM_TIMEOUT_MS = 5_000;
 const PUT_CONCURRENCY = 40;
 
 /**
@@ -71,6 +74,8 @@ interface FirebaseItem {
 
 export interface IngestResult {
   readonly examined: number;
+  readonly items_deferred: number;
+  readonly shards_written: number;
   readonly stories_upserted: number;
   readonly buckets_touched: number;
   readonly recent_entries: number;
@@ -79,21 +84,11 @@ export interface IngestResult {
   readonly watermark: number;
 }
 
-const getJson = async <T>(url: string): Promise<T | null> => {
-  const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-  // A failed item fetch must fail the tick before its watermark advances. Treating
-  // a 503 as a missing item permanently skips that ID on the next run.
+const getJson = async <T>(url: string, timeoutMs = 15_000): Promise<T | null> => {
+  const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+  // A transport failure must remain distinguishable from a confirmed JSON null.
   if (!response.ok) throw new Error(`GET ${url} -> ${response.status}`);
   return (await response.json()) as T | null;
-};
-
-const mapLimit = async <T, R>(items: readonly T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> => {
-  const results: R[] = [];
-  for (let offset = 0; offset < items.length; offset += limit) {
-    const batch = items.slice(offset, offset + limit);
-    results.push(...(await Promise.all(batch.map(worker))));
-  }
-  return results;
 };
 
 const readWatermark = async (env: Env): Promise<number | null> => {
@@ -117,7 +112,59 @@ const isStoryWithUrl = (item: FirebaseItem | null): boolean => {
   return item.url !== undefined && item.url !== '' && item.title !== undefined && item.time !== undefined;
 };
 
+async function fetchItems(ids: readonly number[], from: number, to: number) {
+  const fetched = new Map<number, FirebaseItem | null>();
+  const failed = new Set<number>();
+  const deadline = Date.now() + FETCH_BUDGET_MS;
+  let failedNew = 0;
+  let holdCursor = false;
+  for (let offset = 0; offset < ids.length && Date.now() + ITEM_TIMEOUT_MS <= deadline; offset += FETCH_CONCURRENCY) {
+    const batch = ids.slice(offset, offset + FETCH_CONCURRENCY);
+    const before = failed.size;
+    const beforeNew = failedNew;
+    await Promise.all(batch.map(async id => {
+      try {
+        fetched.set(id, await getJson<FirebaseItem>(`${FIREBASE}/item/${id}.json`, ITEM_TIMEOUT_MS));
+      } catch {
+        failed.add(id);
+        if (id >= from && id <= to) failedNew++;
+      }
+    }));
+    // Check each wave, so an outage late in a catch-up cannot hide behind earlier successes.
+    if ((batch.length >= 20 && failed.size - before >= batch.length / 4) || failedNew > RETRY_BATCH / 2) {
+      holdCursor = failedNew !== beforeNew || failedNew > RETRY_BATCH / 2;
+      console.warn('Firebase item circuit opened', { waveFailures: failed.size - before, failedNew });
+      break;
+    }
+  }
+  if (failedNew > 0 && fetched.size === 0) holdCursor = true;
+  return { fetched, failed, holdCursor };
+}
+
 export const ingest = async (env: Env): Promise<IngestResult> => {
+  // Both the cron and /ingest can publish. An older R2 put completing after a
+  // newer publisher retired its dirty marker would otherwise undo the repair.
+  // Expiry lets a subsequent cron recover from an isolate that never ran finally.
+  const leaseUntil = Date.now() + 20 * 60_000;
+  const lease = await env.DB.prepare(
+    `INSERT INTO meta (key, value) VALUES ('ingest_lease_until', ?1)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value
+     WHERE CAST(meta.value AS INTEGER) <= ?2 RETURNING value`,
+  ).bind(String(leaseUntil), Date.now()).first();
+  if (!lease) throw new Error('Ingest already running');
+  const checkLease = () => {
+    // Leave time for the last in-flight batch to settle before another writer starts.
+    if (Date.now() >= leaseUntil - 2 * 60_000) throw new Error('Ingest lease nearing expiry');
+  };
+  try {
+    return await ingestWithLease(env, checkLease);
+  } finally {
+    await env.DB.prepare("DELETE FROM meta WHERE key='ingest_lease_until' AND value=?")
+      .bind(String(leaseUntil)).run();
+  }
+};
+
+const ingestWithLease = async (env: Env, checkLease: () => void): Promise<IngestResult> => {
   const maxItem = await getJson<number>(`${FIREBASE}/maxitem.json`);
   if (maxItem === null || !Number.isSafeInteger(maxItem) || maxItem < 1) {
     throw new Error('Firebase maxitem is not a positive integer');
@@ -139,11 +186,13 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
 
   const newIds = from <= to ? Array.from({ length: to - from + 1 }, (_, offset) => from + offset) : [];
   const changedIds = (updates?.items ?? []).slice(0, MAX_CHANGED);
-  const candidates = [...new Set([...newIds, ...changedIds, ...liveFeeds.flat()])];
-
-  const items = await mapLimit(candidates, FETCH_CONCURRENCY, (id) =>
-    getJson<FirebaseItem>(`${FIREBASE}/item/${id}.json`),
-  );
+  const now = Math.floor(Date.now() / 1000);
+  const due = await env.DB.prepare(DUE_ITEMS_SQL).bind(now, RETRY_BATCH).all<{ id: number }>();
+  const feedIds = new Set([...liveFeeds.flat(), ...changedIds]);
+  const dueIds = new Set(due.results.map(row => row.id));
+  // Give current stories and the cursor a first wave, then service due work
+  // before a long historical catch-up can consume the wall-clock budget.
+  const candidates = new Set([...feedIds, ...newIds.slice(0, FETCH_CONCURRENCY), ...dueIds, ...newIds]);
 
   /**
    * Rolling re-fetch of the stalest stories' score/descendants/title/url.
@@ -160,48 +209,55 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
    * unchanged and confirmed-gone rows just get their `refreshed_at` bumped, which
    * keeps the pass cheap once the index has settled.
    */
-  const now = Math.floor(Date.now() / 1000);
   const stalest = await env.DB.prepare(
     'SELECT id, url, title, score, descendants FROM stories ORDER BY refreshed_at ASC, ts ASC LIMIT ?1',
   )
     .bind(REFRESH_BATCH)
     .all<{ id: number; url: string; title: string; score: number; descendants: number }>();
-  const fetched = new Map(candidates.map((id, index) => [id, items[index]]));
-  const staleItems = await mapLimit(stalest.results, FETCH_CONCURRENCY, (row) =>
-    fetched.has(row.id)
-      ? Promise.resolve(fetched.get(row.id) ?? null)
-      : getJson<FirebaseItem>(`${FIREBASE}/item/${row.id}.json`),
-  );
+  const storedById = new Map(stalest.results.map(row => [row.id, row]));
+  const ids = [...new Set([...candidates, ...storedById.keys()])];
+  const { fetched, failed, holdCursor } = await fetchItems(ids, from, to);
+  let watermark = previous ?? from - 1;
+  if (!holdCursor) {
+    for (const id of newIds) {
+      if (!fetched.has(id) && !failed.has(id)) break;
+      watermark = id;
+    }
+  }
 
-  const refreshedStories: FirebaseItem[] = [];
+  // A held cursor already preserves its historical holes. Keep independent feed
+  // misses and drain previously queued IDs, even on a retry-only tick.
+  checkLease();
+  const deferred = [...failed].filter(id => candidates.has(id) && !storedById.has(id)
+    && (id <= watermark || id > to || feedIds.has(id) || dueIds.has(id)));
+  const skippedFeeds = [...feedIds].filter(id => !failed.has(id) && !fetched.has(id));
+  await deferItems(env, now, skippedFeeds, deferred);
+
+  const stories: FirebaseItem[] = [];
   const bumpRefreshed: number[] = [];
-  stalest.results.forEach((stored, index) => {
-    // Already handled by the new/changed/live pass, including its refresh time.
-    if (fetched.has(stored.id) && isStoryWithUrl(fetched.get(stored.id) ?? null)) return;
-    const item = staleItems[index];
-    // A null Firebase item is not confirmed gone: leave it stalest for a retry.
-    // Transport/parse failures reject earlier, before any writes or cursor advance.
-    if (item === null || item === undefined) return;
-    // Dead/deleted/no-url: confirmed gone, rotate out of the queue permanently.
-    if (!isStoryWithUrl(item)) {
-      bumpRefreshed.push(stored.id);
-      return;
+  let refreshedChanged = 0;
+  let refreshedUnchanged = 0;
+  for (const id of failed) {
+    if (storedById.has(id)) bumpRefreshed.push(id);
+  }
+  for (const [id, item] of fetched) {
+    const stored = storedById.get(id);
+    if (!item || !isStoryWithUrl(item)) {
+      if (stored) bumpRefreshed.push(id);
+      continue;
     }
-    const unchanged =
-      (item.score ?? 0) === stored.score &&
-      (item.descendants ?? 0) === stored.descendants &&
-      item.url === stored.url &&
-      (item.title ?? '') === stored.title;
-    if (unchanged) {
-      bumpRefreshed.push(stored.id);
-      return;
+    if (stored) {
+      if ((item.score ?? 0) === stored.score && (item.descendants ?? 0) === stored.descendants
+          && item.url === stored.url && item.title === stored.title) {
+        bumpRefreshed.push(id);
+        refreshedUnchanged++;
+        continue;
+      }
+      refreshedChanged++;
     }
-    refreshedStories.push(item);
-  });
+    stories.push(item);
+  }
 
-  const stories = (items.filter(isStoryWithUrl) as FirebaseItem[]).concat(refreshedStories);
-
-  const touched = new Set<number>();
   // Grouped per story, never flattened blindly: a story's DELETE and its
   // reinserts must land in the same batch, or a chunk boundary between them
   // leaves the story with no hash rows at all until the next full regen.
@@ -227,7 +283,6 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
 
     for (const variant of urlVariants(url)) {
       const { h, bucket } = await hashNormalized(variant);
-      touched.add(bucket);
       batch.push(
         env.DB.prepare('INSERT OR REPLACE INTO story_hashes (story_id, h, bucket) VALUES (?1,?2,?3)').bind(id, h, bucket),
       );
@@ -236,31 +291,8 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
 
   // Unchanged or gone re-fetch rows still rotate to the back of the stalest queue, so
   // the stalest-first cursor keeps advancing instead of spinning on them each tick.
-  if (bumpRefreshed.length > 0) {
-    const bumpGroup: D1PreparedStatement[] = [];
-    groups.push({ statements: bumpGroup });
-    for (const bumpId of bumpRefreshed) {
-      bumpGroup.push(env.DB.prepare('UPDATE stories SET refreshed_at = ?1 WHERE id = ?2').bind(now, bumpId));
-    }
-  }
-
-  // Buckets the story previously occupied must be rewritten too, or a removed
-  // variant lingers in a published shard. Collect them before the batch runs.
-  if (stories.length > 0) {
-    const ids = [...new Set(stories.map((story) => story.id).filter((id): id is number => id !== undefined))];
-    // D1 allows at most 100 bound parameters per statement. A catch-up tick or
-    // the 200-story refresh alone can exceed that and otherwise stall every cron
-    // before publishing shards or advancing the watermark.
-    for (let offset = 0; offset < ids.length; offset += BATCH_CHUNK) {
-      const slice = ids.slice(offset, offset + BATCH_CHUNK);
-      const placeholders = slice.map((_, index) => `?${index + 1}`).join(',');
-      const previousBuckets = await env.DB.prepare(
-        `SELECT DISTINCT bucket FROM story_hashes WHERE story_id IN (${placeholders})`,
-      )
-        .bind(...slice)
-        .all<{ bucket: number }>();
-      for (const row of previousBuckets.results) touched.add(row.bucket);
-    }
+  for (const id of bumpRefreshed) {
+    groups.push({ statements: [env.DB.prepare('UPDATE stories SET refreshed_at = ?1 WHERE id = ?2').bind(now, id)] });
   }
 
   // The batches below adjust the manifest's entry counter rather than recounting
@@ -268,16 +300,27 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
   let entryCount = await readHashCount(env);
   if (entryCount === null) entryCount = await recountHashes(env);
 
-  // Pack whole groups into batches without ever splitting one. Two slots per batch
-  // are reserved for the entry-counter adjustments that bracket it.
+  // Pack whole groups into batches without ever splitting one. Reserve four statements for
+  // counter adjustments and the old/new dirty bucket snapshots.
   const runChunk = async (chunk: readonly { storyId?: number; statements: D1PreparedStatement[] }[]) => {
+    checkLease();
     const storyIds = chunk.flatMap((group) => (group.storyId === undefined ? [] : [group.storyId]));
-    await env.DB.batch(withHashCount(env, storyIds, chunk.flatMap((group) => group.statements)));
+    const statements = chunk.flatMap(group => group.statements);
+    if (storyIds.length) {
+      const placeholders = storyIds.map(() => '?').join(',');
+      const markBuckets = () => env.DB.prepare(
+        `INSERT OR REPLACE INTO dirty_shards (updated_at, bucket)
+         SELECT DISTINCT ?, bucket FROM story_hashes WHERE story_id IN (${placeholders})`,
+      ).bind(Date.now(), ...storyIds);
+      statements.unshift(markBuckets());
+      statements.push(markBuckets());
+    }
+    await env.DB.batch(withHashCount(env, storyIds, statements));
   };
   let chunk: typeof groups = [];
   let chunkSize = 0;
   for (const group of groups) {
-    if (chunkSize > 0 && chunkSize + group.statements.length > BATCH_CHUNK - 2) {
+    if (chunkSize > 0 && chunkSize + group.statements.length > BATCH_CHUNK - 4) {
       await runChunk(chunk);
       chunk = [];
       chunkSize = 0;
@@ -287,12 +330,24 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
   }
   if (chunkSize > 0) await runChunk(chunk);
 
+  // Existing stories already have a durable refresh path, even if a legacy
+  // retry row happened to overlap a failed fetch.
+  const recovered = [...fetched.keys(), ...[...failed].filter(id => storedById.has(id))];
+  for (let offset = 0; offset < recovered.length; offset += BATCH_CHUNK) {
+    const slice = recovered.slice(offset, offset + BATCH_CHUNK);
+    await env.DB.prepare(`DELETE FROM item_retries WHERE id IN (${slice.map(() => '?').join(',')})`)
+      .bind(...slice).run();
+  }
+
   // Rewrite every touched shard from D1, which is now authoritative.
-  const buckets = [...touched];
+  let shardsWritten = 0;
+  const { results: buckets } = await env.DB.prepare('SELECT bucket, updated_at FROM dirty_shards')
+    .all<{ bucket: string; updated_at: number }>();
   for (let offset = 0; offset < buckets.length; offset += PUT_CONCURRENCY) {
+    checkLease();
     const slice = buckets.slice(offset, offset + PUT_CONCURRENCY);
-    await Promise.all(
-      slice.map(async (bucket) => {
+    const writes = await Promise.allSettled(
+      slice.map(async ({ bucket }) => {
         const rows = await env.DB.prepare(
           `SELECT h.h AS h, s.id AS id, s.title AS t, s.score AS p, s.descendants AS c, s.ts AS ts
              FROM story_hashes h JOIN stories s ON s.id = h.story_id
@@ -300,12 +355,22 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
         )
           .bind(bucket)
           .all<ShardEntry>();
-        await putShard(env, bucket, rows.results);
+        if (await putShard(env, Number(bucket), rows.results, true)) shardsWritten++;
       }),
     );
+    for (const write of writes) if (write.status === 'rejected') throw write.reason;
+    await env.DB.batch(slice.map(row => env.DB.prepare(
+      'DELETE FROM dirty_shards WHERE bucket = ? AND updated_at = ?',
+    ).bind(row.bucket, row.updated_at)));
+  }
+
+  if (failed.size > 0 && fetched.size === 0) {
+    if (previous === null) await writeWatermark(env, watermark);
+    throw new Error('All Firebase item requests failed');
   }
 
   // recent.json covers the 6 h shard edge-cache TTL, not a regen gap.
+  checkLease();
   const cutoff = Math.floor(Date.now() / 1000) - RECENT_WINDOW_SECONDS;
   const recent = await env.DB.prepare(
     `SELECT h.h AS h, s.id AS id, s.title AS t, s.score AS p, s.descendants AS c, s.ts AS ts
@@ -320,16 +385,17 @@ export const ingest = async (env: Env): Promise<IngestResult> => {
   // can tell how fresh the index is.
   await putManifest(env, (await readHashCount(env)) ?? entryCount, BUCKET_COUNT);
 
-  // Advance the watermark only over ids actually examined.
-  if (newIds.length > 0 || previous === null) await writeWatermark(env, to > 0 ? to : maxItem);
+  if (previous !== watermark) await writeWatermark(env, watermark);
 
   return {
-    examined: candidates.length,
+    examined: [...candidates].filter(id => fetched.has(id) || failed.has(id)).length,
+    items_deferred: deferred.length + skippedFeeds.length,
+    shards_written: shardsWritten,
     stories_upserted: stories.length,
-    buckets_touched: touched.size,
+    buckets_touched: buckets.length,
     recent_entries: recent.results.length,
-    refreshed_changed: refreshedStories.length,
-    refreshed_unchanged: bumpRefreshed.length,
-    watermark: to > 0 ? to : maxItem,
+    refreshed_changed: refreshedChanged,
+    refreshed_unchanged: refreshedUnchanged,
+    watermark,
   };
 };
