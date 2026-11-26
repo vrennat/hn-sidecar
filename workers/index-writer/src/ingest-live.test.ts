@@ -184,16 +184,40 @@ test('a 95% outage stops requests and holds the historical cursor', async () => 
   } finally { f.db.close(); }
 });
 
-test('the fetch deadline leaves unexamined historical IDs for the next tick', async () => {
+test('the fetch deadline leaves unexamined historical IDs for the next tick without clipping the final wave timeout', async () => {
   const f = fixture();
   let millis = 2_000_000_000_000;
   const clock = spyOn(Date, 'now').mockImplementation(() => millis);
+  const signalTimeouts = new WeakMap<AbortSignal, number>();
+  const origTimeout = AbortSignal.timeout.bind(AbortSignal);
+  const timeoutSpy = spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+    const sig = origTimeout(ms);
+    signalTimeouts.set(sig, ms);
+    return sig;
+  });
+  let inWave = 0;
   try {
-    const calls = stubFirebase(3500, () => { millis += 2000; return Response.json(null); });
+    const calls: number[] = [];
+    globalThis.fetch = (async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith('/maxitem.json')) return Response.json(3500);
+      if (path.endsWith('/updates.json')) return Response.json({ items: [] });
+      if (path.endsWith('stories.json')) return Response.json([]);
+      const id = Number(path.match(/item\/(\d+)/)?.[1]);
+      calls.push(id);
+      const budgetMs = init?.signal ? (signalTimeouts.get(init.signal) ?? 5_000) : 5_000;
+      inWave++;
+      if (inWave % 25 === 0) millis += 1_200;
+      if (budgetMs < 1_200) throw new DOMException('The operation timed out.', 'TimeoutError');
+      return Response.json(null);
+    }) as typeof fetch;
     const result = await ingest(f.env);
-    expect(calls.length).toBeLessThanOrEqual(50);
-    expect(result.watermark).toBe(1000 + calls.length);
-  } finally { clock.mockRestore(); f.db.close(); }
+    expect(calls.length).toBe(850);
+    expect(result.items_deferred).toBe(0);
+    expect(result.watermark).toBe(1850);
+    expect(f.db.query("SELECT value FROM meta WHERE key='last_max_item'").get()).toEqual({ value: '1850' });
+    expect(f.db.query('SELECT count(*) AS n FROM item_retries').get()).toEqual({ n: 0 });
+  } finally { timeoutSpy.mockRestore(); clock.mockRestore(); f.db.close(); }
 });
 
 test('failed stale refreshes rotate while a missed new story gets the retry slot', async () => {

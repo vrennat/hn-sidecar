@@ -44,6 +44,7 @@ const RECENT_MAX_ENTRIES = 5_000;
 
 const FETCH_CONCURRENCY = 25;
 const FETCH_BUDGET_MS = 45_000;
+const ITEM_TIMEOUT_MS = 5_000;
 const PUT_CONCURRENCY = 40;
 
 /**
@@ -117,14 +118,13 @@ async function fetchItems(ids: readonly number[], from: number, to: number) {
   const deadline = Date.now() + FETCH_BUDGET_MS;
   let failedNew = 0;
   let holdCursor = false;
-  for (let offset = 0; offset < ids.length && Date.now() < deadline; offset += FETCH_CONCURRENCY) {
+  for (let offset = 0; offset < ids.length && Date.now() + ITEM_TIMEOUT_MS <= deadline; offset += FETCH_CONCURRENCY) {
     const batch = ids.slice(offset, offset + FETCH_CONCURRENCY);
     const before = failed.size;
     const beforeNew = failedNew;
-    const timeout = Math.max(1, Math.min(5_000, deadline - Date.now()));
     await Promise.all(batch.map(async id => {
       try {
-        fetched.set(id, await getJson<FirebaseItem>(`${FIREBASE}/item/${id}.json`, timeout));
+        fetched.set(id, await getJson<FirebaseItem>(`${FIREBASE}/item/${id}.json`, ITEM_TIMEOUT_MS));
       } catch {
         failed.add(id);
         if (id >= from && id <= to) failedNew++;
