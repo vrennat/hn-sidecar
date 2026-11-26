@@ -36,7 +36,7 @@ export const putShard = async (env: Env, bucket: number, entries: readonly Shard
     const existing = await env.INDEX.head(key);
     const checksum = existing?.checksums.sha256;
     const bytes = new Uint8Array(digest);
-    if (checksum && new Uint8Array(checksum).every((byte, i) => byte === bytes[i])) return false;
+    if (checksum?.byteLength === bytes.length && new Uint8Array(checksum).every((byte, i) => byte === bytes[i])) return false;
   }
   await env.INDEX.put(key, body, {
     sha256: digest,
